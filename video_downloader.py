@@ -22,7 +22,8 @@ class VideoDownloader:
         ],
         'instagram': [
             r'(?:https?://)?(?:www\.)?instagram\.com/(?:p|reel|tv)/([a-zA-Z0-9_-]+)',
-            r'(?:https?://)?(?:www\.)?instagram\.com/stories/[^/]+/([0-9]+)'
+            r'(?:https?://)?(?:www\.)?instagram\.com/stories/[^/]+/([0-9]+)',
+            r'(?:https?://)?(?:www\.)?instagram\.com/reels/([a-zA-Z0-9_-]+)'
         ],
         'tiktok': [
             r'(?:https?://)?(?:www\.)?tiktok\.com/@[^/]+/video/([0-9]+)',
@@ -58,10 +59,19 @@ class VideoDownloader:
         Returns:
             Platform name if detected, None otherwise
         """
+        self.logger.info(f"Detecting platform for URL: {url}")
         for platform, patterns in self.URL_PATTERNS.items():
-            for pattern in patterns:
-                if re.search(pattern, url, re.IGNORECASE):
+            self.logger.info(f"Checking patterns for platform: {platform}")
+            for i, pattern in enumerate(patterns):
+                self.logger.info(f"Trying pattern {i+1}/{len(patterns)} for {platform}: {pattern}")
+                match = re.search(pattern, url, re.IGNORECASE)
+                if match:
+                    self.logger.info(f"✅ Pattern matched! Platform detected: {platform} for URL: {url}")
+                    self.logger.info(f"Match details: {match.group(0)}")
                     return platform
+                else:
+                    self.logger.info(f"❌ Pattern did not match for {platform}")
+        self.logger.info(f"No platform detected for URL: {url} after checking all patterns")
         return None
 
     def is_video_url(self, url: str) -> bool:
@@ -73,7 +83,16 @@ class VideoDownloader:
         Returns:
             True if URL is from supported platform, False otherwise
         """
-        return self.detect_platform(url) is not None
+        self.logger.info(f"Checking if URL is from a supported video platform: {url}")
+        platform = self.detect_platform(url)
+        is_supported = platform is not None
+
+        if is_supported:
+            self.logger.info(f"✅ URL validation result: SUPPORTED - URL is from {platform} platform: {url}")
+        else:
+            self.logger.info(f"❌ URL validation result: NOT SUPPORTED - URL does not match any known platform patterns: {url}")
+
+        return is_supported
 
     def get_ydl_opts(self, platform: str) -> Dict[str, Any]:
         """Get yt-dlp options for specific platform
@@ -84,6 +103,8 @@ class VideoDownloader:
         Returns:
             Dictionary of yt-dlp options
         """
+        self.logger.debug(f"Getting yt-dlp options for platform: {platform}")
+
         base_opts = {
             'outtmpl': os.path.join(self.download_dir, '%(title)s.%(ext)s'),
             'format': 'best[filesize<50M]/best',  # Telegram file size limit
@@ -105,6 +126,7 @@ class VideoDownloader:
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         }
+        self.logger.debug(f"Base yt-dlp options configured with output template: {base_opts['outtmpl']}")
 
         # Platform-specific options
         platform_opts = {
@@ -123,8 +145,12 @@ class VideoDownloader:
         }
 
         if platform in platform_opts:
+            self.logger.debug(f"Applying platform-specific options for {platform}: {platform_opts[platform]}")
             base_opts.update(platform_opts[platform])
+        else:
+            self.logger.debug(f"No platform-specific options found for {platform}, using base options")
 
+        self.logger.debug(f"Final yt-dlp options for {platform}: format={base_opts['format']}")
         return base_opts
 
     def progress_hook(self, d):
@@ -158,11 +184,16 @@ class VideoDownloader:
             Dictionary with download info if successful, None otherwise
             Contains: 'filepath', 'title', 'platform', 'duration', 'filesize'
         """
+        self.logger.info(f"🔍 Processing download request for URL: {url}")
+
+        # Check if URL is supported by any platform
         platform = self.detect_platform(url)
         if not platform:
-            self.logger.error(f"Unsupported URL: {url}")
+            self.logger.error(f"❌ URL validation failed: Unsupported URL format: {url}")
+            self.logger.info(f"No matching pattern found for URL: {url}")
             return None
 
+        self.logger.info(f"✅ URL validation passed: URL is from {platform} platform")
         self.logger.info(f"Preparing to download video from {platform}: {url}")
         ydl_opts = self.get_ydl_opts(platform)
 
@@ -182,6 +213,11 @@ class VideoDownloader:
 
                 # Check file size before downloading
                 filesize = info.get('filesize') or info.get('filesize_approx', 0)
+                # Ensure filesize is not None to avoid TypeError
+                if filesize is None:
+                    filesize = 0
+                    self.logger.warning("File size information not available")
+
                 self.logger.info(f"Estimated file size: {filesize / (1024*1024):.1f}MB")
 
                 if filesize > 50 * 1024 * 1024:  # 50MB limit
@@ -215,6 +251,10 @@ class VideoDownloader:
                 actual_filesize = os.path.getsize(filename)
                 self.logger.info(f"Download complete - File: {filename}, Size: {actual_filesize / (1024*1024):.1f}MB")
 
+                # Log successful download with detailed information
+                self.logger.info(f"✅ Download successful for URL: {url}")
+                self.logger.info(f"Video details - Title: {title}, Platform: {platform}, Duration: {duration}s, Size: {actual_filesize / (1024*1024):.1f}MB")
+
                 return {
                     'filepath': filename,
                     'title': title,
@@ -228,9 +268,15 @@ class VideoDownloader:
             error_message = str(e)
             self.logger.error(f"Error downloading {url}: {error_message}")
 
+            # Log detailed error information
+            self.logger.info(f"❌ Download failed for URL: {url}")
+            self.logger.info(f"Platform detected: {platform}")
+            self.logger.info(f"Error details: {error_message}")
+
             # Check if this is a TikTok photo URL (not a video)
             if platform == 'tiktok' and '/photo/' in error_message:
                 self.logger.warning(f"Detected TikTok photo URL (not a video): {url}")
+                self.logger.info(f"Special case: URL is a TikTok photo, not a video")
                 return {
                     'error': 'tiktok_photo',
                     'message': 'This appears to be a TikTok photo, not a video.'
@@ -247,10 +293,15 @@ class VideoDownloader:
         Returns:
             True if file was removed successfully, False otherwise
         """
+        self.logger.debug(f"Attempting to clean up file: {filepath}")
         try:
             if os.path.exists(filepath):
+                self.logger.debug(f"File exists, removing: {filepath}")
                 os.remove(filepath)
+                self.logger.info(f"Successfully removed file: {filepath}")
                 return True
+            else:
+                self.logger.warning(f"File not found for cleanup: {filepath}")
         except Exception as e:
             self.logger.error(f"Error removing file {filepath}: {str(e)}")
         return False
@@ -265,6 +316,7 @@ def test_downloader():
         "https://www.youtube.com/watch?v=dQw4w9WgXcQ",  # Rick Roll
         "https://youtu.be/dQw4w9WgXcQ",  # Short YouTube URL
         "https://www.instagram.com/p/example/",  # Instagram (example)
+        "https://www.instagram.com/reels/DJJ4ngeoYbx/",  # Instagram reels (from issue)
         "https://www.tiktok.com/@user/video/123456789",  # TikTok (example)
         "https://vt.tiktok.com/ZSkUakqex/",  # TikTok vt format (from issue)
         "https://www.facebook.com/watch/?v=123456789",  # Facebook (example)

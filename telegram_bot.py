@@ -40,6 +40,11 @@ class TelegramVideoBot:
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /start command"""
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        chat_type = update.effective_chat.type
+        logger.info(f"Received /start command from user {user.id} in chat {chat_id} (type: {chat_type})")
+
         welcome_message = """
 🎥 *Video Downloader Bot*
 
@@ -54,10 +59,16 @@ I work in both private chats and group chats!
 
 *Note:* I only process new messages sent after I was added to the chat.
         """
+        logger.info(f"Sending welcome message to user {user.id} in chat {chat_id}")
         await update.message.reply_text(welcome_message, parse_mode=ParseMode.MARKDOWN)
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /help command"""
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        chat_type = update.effective_chat.type
+        logger.info(f"Received /help command from user {user.id} in chat {chat_id} (type: {chat_type})")
+
         help_message = """
 🔧 *How to use:*
 
@@ -84,10 +95,16 @@ I work in both private chats and group chats!
 /help - Show this help message
 /status - Check bot status
         """
+        logger.info(f"Sending help message to user {user.id} in chat {chat_id}")
         await update.message.reply_text(help_message, parse_mode=ParseMode.MARKDOWN)
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle /status command"""
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        chat_type = update.effective_chat.type
+        logger.info(f"Received /status command from user {user.id} in chat {chat_id} (type: {chat_type})")
+
         status_message = f"""
 📊 *Bot Status*
 
@@ -95,6 +112,7 @@ I work in both private chats and group chats!
 📁 Downloads processed: {len(self.processed_messages)}
 🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok
         """
+        logger.info(f"Sending status message to user {user.id} in chat {chat_id} (downloads processed: {len(self.processed_messages)})")
         await update.message.reply_text(status_message, parse_mode=ParseMode.MARKDOWN)
 
     def extract_urls(self, text: str) -> list:
@@ -245,36 +263,53 @@ I work in both private chats and group chats!
 
     def run(self) -> None:
         """Start the bot"""
+        logger.info("Initializing Telegram Video Bot...")
+
         # Create application
         self.application = Application.builder().token(self.token).build()
+        logger.info("Application created with token")
 
         # Add handlers
+        logger.info("Registering command handlers...")
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+
         # Handle text messages in private chats
+        logger.info("Registering message handlers for private chats...")
         self.application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
             self.handle_message
         ))
 
         # Handle text messages in group chats
+        logger.info("Registering message handlers for group chats...")
         self.application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
             self.handle_message
         ))
 
         # Add error handler
+        logger.info("Registering error handler...")
         self.application.add_error_handler(self.error_handler)
 
         # Start the bot
         logger.info("Starting Telegram Video Bot...")
-        self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+        try:
+            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
+            logger.info("Bot polling stopped")
+        except Exception as e:
+            logger.error(f"Error running bot: {str(e)}")
+        finally:
+            logger.info("Bot shutdown complete")
 
 
 def main():
     """Main function to run the bot"""
+    logger.info("Starting main function")
+
     # Get bot token from environment variable
+    logger.info("Retrieving bot token from environment variables")
     token = os.getenv('TELEGRAM_BOT_TOKEN')
 
     if not token:
@@ -284,8 +319,11 @@ def main():
         return
 
     # Create and run bot
+    logger.info("Creating bot instance")
     bot = TelegramVideoBot(token)
+    logger.info("Running bot")
     bot.run()
+    logger.info("Main function completed")
 
 
 if __name__ == "__main__":
