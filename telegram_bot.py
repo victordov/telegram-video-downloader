@@ -54,7 +54,11 @@ I can download videos from:
 • Facebook
 • TikTok
 
-Just send me a message with a video link and I'll download and share it!
+In private chats: All videos are downloaded automatically!
+In group chats: 
+• TikTok videos are downloaded automatically
+• For other platforms, add #download tag to your message
+
 I work in both private chats and group chats!
 
 *Note:* I only process new messages sent after I was added to the chat.
@@ -78,7 +82,12 @@ I work in both private chats and group chats!
    • Facebook (facebook.com, fb.watch)
    • TikTok (tiktok.com, vm.tiktok.com)
 
-2. I'll automatically detect the video link and download it
+2. Video download behavior:
+   • In private chats: All videos are downloaded automatically
+   • In group chats:
+     - TikTok videos are downloaded automatically
+     - For other platforms (YouTube, Instagram, Facebook), add #download tag to your message
+
 3. The video will be shared back to the chat
 
 *Works in:*
@@ -155,6 +164,9 @@ I work in both private chats and group chats!
             # In one-to-one chats, log every message
             logger.info(f"Message in private chat: {message.text}")
 
+        # Check if message contains the download tag for non-TikTok videos
+        has_download_tag = "#download" in message.text.lower()
+
         # Extract URLs from message
         urls = self.extract_urls(message.text)
 
@@ -167,9 +179,17 @@ I work in both private chats and group chats!
                     supported_platform_urls.append((url, platform))
                     logger.info(f"Found {platform} URL in message: {url}")
 
-            # Process supported platform URLs
+            # Process supported platform URLs based on platform, tag, and chat type
             for url, platform in supported_platform_urls:
-                await self.process_video_url(message, url)
+                # Always download videos in private chats, TikTok videos in any chat, or videos with the download tag
+                if chat_type == 'private' or platform == 'tiktok' or has_download_tag:
+                    await self.process_video_url(message, url)
+                else:
+                    logger.info(f"Skipping {platform} URL: {url} - No download tag found in group chat")
+                    await message.reply_text(
+                        f"Found {platform.title()} video link. Add #download tag to download this video.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
         else:
             # If no URLs found, log the full message (except for private chats which are already logged)
             if chat_type != 'private':
