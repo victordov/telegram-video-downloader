@@ -35,6 +35,10 @@ class VideoDownloader:
             r'(?:https?://)?(?:www\.)?facebook\.com/[^/]+/videos/([0-9]+)',
             r'(?:https?://)?(?:www\.)?facebook\.com/watch/?\?v=([0-9]+)',
             r'(?:https?://)?(?:www\.)?fb\.watch/([a-zA-Z0-9_-]+)'
+        ],
+        'twitter': [
+            r'(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/[^/]+/status/([0-9]+)',
+            r'(?:https?://)?(?:www\.)?t\.co/([a-zA-Z0-9]+)'
         ]
     }
 
@@ -140,6 +144,9 @@ class VideoDownloader:
                 'format': 'best[filesize<50M]/best',
             },
             'facebook': {
+                'format': 'best[filesize<50M]/best',
+            },
+            'twitter': {
                 'format': 'best[filesize<50M]/best',
             }
         }
@@ -320,6 +327,9 @@ def test_downloader():
         "https://www.tiktok.com/@user/video/123456789",  # TikTok (example)
         "https://vt.tiktok.com/ZSkUakqex/",  # TikTok vt format (from issue)
         "https://www.facebook.com/watch/?v=123456789",  # Facebook (example)
+        "https://twitter.com/username/status/1234567890",  # Twitter (example)
+        "https://x.com/username/status/1234567890",  # X.com (example)
+        "https://t.co/abcdef123",  # Twitter shortened URL (example)
         "https://example.com/not-a-video"  # Not a video URL
     ]
 

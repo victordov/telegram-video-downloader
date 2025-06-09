@@ -81,12 +81,13 @@ I work in both private chats and group chats!
    • Instagram (instagram.com)
    • Facebook (facebook.com, fb.watch)
    • TikTok (tiktok.com, vm.tiktok.com)
+   • Twitter/X (twitter.com, x.com, t.co)
 
 2. Video download behavior:
    • In private chats: All videos are downloaded automatically
    • In group chats:
      - TikTok videos are downloaded automatically
-     - For other platforms (YouTube, Instagram, Facebook), add #download tag to your message
+     - For other platforms (YouTube, Instagram, Facebook, Twitter/X), add #download tag to your message
 
 3. The video will be shared back to the chat
 
@@ -119,7 +120,7 @@ I work in both private chats and group chats!
 
 ✅ Bot is running
 📁 Downloads processed: {len(self.processed_messages)}
-🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok
+🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok, Twitter/X
         """
         logger.info(f"Sending status message to user {user.id} in chat {chat_id} (downloads processed: {len(self.processed_messages)})")
         await update.message.reply_text(status_message, parse_mode=ParseMode.MARKDOWN)
