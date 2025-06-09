@@ -187,10 +187,10 @@ I work in both private chats and group chats!
                     await self.process_video_url(message, url)
                 else:
                     logger.info(f"Skipping {platform} URL: {url} - No download tag found in group chat")
-                    await message.reply_text(
-                        f"Found {platform.title()} video link. Add #download tag to download this video.",
-                        parse_mode=ParseMode.MARKDOWN
-                    )
+                    # await message.reply_text(
+                    #     f"Found {platform.title()} video link. Add #download tag to download this video.",
+                    #     parse_mode=ParseMode.MARKDOWN
+                    # )
         else:
             # If no URLs found, log the full message (except for private chats which are already logged)
             if chat_type != 'private':
@@ -229,6 +229,19 @@ I work in both private chats and group chats!
                     logger.warning(f"TikTok photo URL detected: {url}")
                     await processing_msg.edit_text(
                         f"❌ {result['message']} The bot can only download videos."
+                    )
+                elif result['error'] == 'file_too_large':
+                    filesize_mb = result['filesize'] / (1024*1024)
+                    logger.warning(f"Video too large to download: {filesize_mb:.1f}MB (limit: 50MB), URL: {url}")
+                    logger.info(f"Large video details - Title: {result.get('title', 'Unknown')}, Platform: {result.get('platform', 'Unknown')}")
+                    await processing_msg.edit_text(
+                        f"❌ {result['message']} Video size: {filesize_mb:.1f}MB (limit: 50MB)"
+                    )
+                elif result['error'] == 'registered_users_only':
+                    logger.warning(f"Content only available for registered users: {url}")
+                    logger.info(f"Platform: {result.get('platform', 'Unknown')}")
+                    await processing_msg.edit_text(
+                        f"❌ {result['message']}"
                     )
                 else:
                     logger.warning(f"Failed to download video from URL: {url}")

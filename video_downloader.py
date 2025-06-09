@@ -229,7 +229,14 @@ class VideoDownloader:
 
                 if filesize > 50 * 1024 * 1024:  # 50MB limit
                     self.logger.error(f"File too large: {filesize / (1024*1024):.1f}MB (limit: 50MB)")
-                    return None
+                    return {
+                        'error': 'file_too_large',
+                        'message': f'Video file is too large to download (limit: 50MB)',
+                        'filesize': filesize,
+                        'title': title,
+                        'platform': platform,
+                        'duration': duration
+                    }
 
                 # Download the video
                 self.logger.info(f"Starting download of {title} from {platform}")
@@ -244,12 +251,28 @@ class VideoDownloader:
                     self.logger.info(f"File not found at expected path, searching for alternatives")
                     # Try to find the downloaded file
                     base_name = os.path.splitext(filename)[0]
-                    for ext in ['.mp4', '.webm', '.mkv', '.avi', '.mov']:
-                        test_path = base_name + ext
-                        if os.path.exists(test_path):
-                            filename = test_path
-                            self.logger.info(f"Found file at alternative path: {filename}")
+
+                    # First check for playlist files (with #1, #2, etc. in the filename)
+                    playlist_found = False
+                    for i in range(1, 10):  # Check for up to 9 playlist items
+                        for ext in ['.mp4', '.webm', '.mkv', '.avi', '.mov']:
+                            test_path = f"{base_name} #{i}{ext}"
+                            if os.path.exists(test_path):
+                                filename = test_path
+                                self.logger.info(f"Found playlist file at path: {filename}")
+                                playlist_found = True
+                                break
+                        if playlist_found:
                             break
+
+                    # If no playlist files found, try different extensions
+                    if not playlist_found:
+                        for ext in ['.mp4', '.webm', '.mkv', '.avi', '.mov']:
+                            test_path = base_name + ext
+                            if os.path.exists(test_path):
+                                filename = test_path
+                                self.logger.info(f"Found file at alternative path: {filename}")
+                                break
 
                 if not os.path.exists(filename):
                     self.logger.error(f"Downloaded file not found: {filename}")
@@ -287,6 +310,15 @@ class VideoDownloader:
                 return {
                     'error': 'tiktok_photo',
                     'message': 'This appears to be a TikTok photo, not a video.'
+                }
+
+            # Check if this is a content only available for registered users
+            if "This content is only available for registered users" in error_message:
+                self.logger.warning(f"Detected content only available for registered users: {url}")
+                self.logger.info(f"Special case: Content requires authentication")
+                return {
+                    'error': 'registered_users_only',
+                    'message': 'This video is only available for registered users who follow this account.'
                 }
 
             return None
