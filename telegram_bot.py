@@ -1,6 +1,7 @@
 """
 Telegram Bot for downloading and sharing videos from social media platforms
-Supports YouTube, Instagram, Facebook, and TikTok
+Supports YouTube, Instagram, Facebook, TikTok, Twitter/X, and Threads
+Also supports taking screenshots of Threads posts when they're not videos
 """
 
 import os
@@ -53,6 +54,8 @@ I can download videos from:
 • Instagram  
 • Facebook
 • TikTok
+• Twitter/X
+• Threads (screenshots for non-video posts)
 
 In private chats: All videos are downloaded automatically!
 In group chats: 
@@ -82,14 +85,16 @@ I work in both private chats and group chats!
    • Facebook (facebook.com, fb.watch)
    • TikTok (tiktok.com, vm.tiktok.com)
    • Twitter/X (twitter.com, x.com, t.co)
+   • Threads (threads.com, threads.net)
 
 2. Video download behavior:
    • In private chats: All videos are downloaded automatically
    • In group chats:
      - TikTok videos are downloaded automatically
-     - For other platforms (YouTube, Instagram, Facebook, Twitter/X), add #download tag to your message
+     - For other platforms (YouTube, Instagram, Facebook, Twitter/X, Threads), add #download tag to your message
 
 3. The video will be shared back to the chat
+   • For Threads posts that are not videos, a screenshot will be taken and shared as a photo
 
 *Works in:*
 • Private chats
@@ -98,7 +103,7 @@ I work in both private chats and group chats!
 *Limitations:*
 • Maximum file size: 50MB
 • Only processes new messages (after bot was added)
-• Supports video content only
+• Supports video content and screenshots for Threads posts
 
 *Commands:*
 /start - Show welcome message
@@ -120,7 +125,7 @@ I work in both private chats and group chats!
 
 ✅ Bot is running
 📁 Downloads processed: {len(self.processed_messages)}
-🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok, Twitter/X
+🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads
         """
         logger.info(f"Sending status message to user {user.id} in chat {chat_id} (downloads processed: {len(self.processed_messages)})")
         await update.message.reply_text(status_message, parse_mode=ParseMode.MARKDOWN)
@@ -197,31 +202,50 @@ I work in both private chats and group chats!
                 logger.info(f"Message without URLs: {message.text}")
 
     async def process_video_url(self, message: Message, url: str) -> None:
-        """Process a video URL and send the downloaded video
+        """Process a URL and send the downloaded video or screenshot
 
         Args:
             message: Original message containing the URL
-            url: Video URL to process
+            url: URL to process (video URL or Threads post URL)
         """
         platform = self.downloader.detect_platform(url)
 
         # Log the URL being accessed
         chat_id = message.chat.id
         chat_title = message.chat.title if message.chat.title else "Private Chat"
-        logger.info(f"Attempting to download video from URL: {url}")
+        logger.info(f"Processing content from URL: {url}")
         logger.info(f"Platform detected: {platform}")
         logger.info(f"Request from chat: {chat_title} (ID: {chat_id})")
 
         # Send processing message
+        processing_text = f"🔄 Processing content from {platform.title()}..."
+
         processing_msg = await message.reply_text(
-            f"🔄 Downloading video from {platform.title()}...",
+            processing_text,
             parse_mode=ParseMode.MARKDOWN
         )
 
         try:
-            # Download the video
-            logger.info(f"Starting download process for URL: {url}")
-            result = self.downloader.download_video(url)
+            # Check if the URL contains a video
+            logger.info(f"Checking if URL contains a video: {url}")
+            has_video = self.downloader.check_for_video(url)
+
+            if has_video:
+                # If it contains a video, download it
+                logger.info(f"URL contains a video, downloading: {url}")
+                await processing_msg.edit_text(
+                    f"🔄 Downloading video from {platform.title()}...",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                result = self.downloader.download_video(url)
+            else:
+                # If it doesn't contain a video, take a screenshot
+                logger.info(f"URL does not contain a video, taking screenshot: {url}")
+                await processing_msg.edit_text(
+                    f"🔄 Taking screenshot of {platform.title()} post...",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+                result = self.downloader.take_screenshot(url)
 
             if isinstance(result, dict) and 'error' in result:
                 # Handle specific error cases
@@ -243,6 +267,12 @@ I work in both private chats and group chats!
                     await processing_msg.edit_text(
                         f"❌ {result['message']}"
                     )
+                elif result['error'] == 'threads_screenshot_failed':
+                    logger.warning(f"Failed to take screenshot of Threads post: {url}")
+                    logger.info(f"Platform: {result.get('platform', 'Unknown')}")
+                    await processing_msg.edit_text(
+                        f"❌ {result['message']}"
+                    )
                 else:
                     logger.warning(f"Failed to download video from URL: {url}")
                     await processing_msg.edit_text(
@@ -257,24 +287,42 @@ I work in both private chats and group chats!
                 return
 
             # Log successful download
-            logger.info(f"Successfully downloaded video: {result['title']}")
+            logger.info(f"Successfully downloaded content: {result['title']}")
             logger.info(f"File size: {result['filesize'] / (1024*1024):.1f}MB")
-            logger.info(f"Duration: {result['duration']}s")
             logger.info(f"File path: {result['filepath']}")
 
-            # Send the video file
-            with open(result['filepath'], 'rb') as video_file:
-                caption = f"🎥 *{result['title']}*\n\n📱 Platform: {result['platform'].title()}"
-                if result['duration']:
-                    caption += f"\n⏱️ Duration: {result['duration']}s"
-                caption += f"\n📊 Size: {result['filesize'] / (1024*1024):.1f}MB"
+            # Check if this is a screenshot or a video
+            is_screenshot = result.get('is_screenshot', False)
 
-                logger.info(f"Sending video to chat: {chat_title} (ID: {chat_id})")
-                await message.reply_video(
-                    video=video_file,
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN
-                )
+            if is_screenshot:
+                # Send the screenshot as a photo
+                with open(result['filepath'], 'rb') as photo_file:
+                    caption = f"📸 *{result['title']}*\n\n📱 Platform: {result['platform'].title()}"
+                    caption += f"\n📊 Size: {result['filesize'] / (1024*1024):.1f}MB"
+
+                    logger.info(f"Sending screenshot to chat: {chat_title} (ID: {chat_id})")
+                    await message.reply_photo(
+                        photo=photo_file,
+                        caption=caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+            else:
+                # Log video duration
+                logger.info(f"Duration: {result.get('duration', 'Unknown')}s")
+
+                # Send the video file
+                with open(result['filepath'], 'rb') as video_file:
+                    caption = f"🎥 *{result['title']}*\n\n📱 Platform: {result['platform'].title()}"
+                    if result.get('duration'):
+                        caption += f"\n⏱️ Duration: {result['duration']}s"
+                    caption += f"\n📊 Size: {result['filesize'] / (1024*1024):.1f}MB"
+
+                    logger.info(f"Sending video to chat: {chat_title} (ID: {chat_id})")
+                    await message.reply_video(
+                        video=video_file,
+                        caption=caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    )
 
             # Delete processing message
             await processing_msg.delete()
