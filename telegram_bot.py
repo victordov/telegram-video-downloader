@@ -7,7 +7,7 @@ Also supports taking screenshots of Threads posts when they're not videos
 import os
 import logging
 import re
-from typing import Optional
+from typing import Optional, List
 from telegram import Update, Message
 from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
 from telegram.constants import ParseMode
@@ -23,6 +23,12 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Get private chat IDs from environment variable
+PRIVATE_CHAT_IDS = os.getenv('PRIVATE_CHAT_IDS', '').split(',')
+# Clean up the list (remove empty strings and whitespace)
+PRIVATE_CHAT_IDS = [chat_id.strip() for chat_id in PRIVATE_CHAT_IDS if chat_id.strip()]
+logger.info(f"Loaded {len(PRIVATE_CHAT_IDS)} private chat IDs from environment variables")
 
 
 class TelegramVideoBot:
@@ -258,27 +264,105 @@ I work in both private chats and group chats!
                     filesize_mb = result['filesize'] / (1024*1024)
                     logger.warning(f"Video too large to download: {filesize_mb:.1f}MB (limit: 50MB), URL: {url}")
                     logger.info(f"Large video details - Title: {result.get('title', 'Unknown')}, Platform: {result.get('platform', 'Unknown')}")
-                    await processing_msg.edit_text(
-                        f"❌ {result['message']} Video size: {filesize_mb:.1f}MB (limit: 50MB)"
-                    )
+                    
+                    # Special case for private chats with IDs in the PRIVATE_CHAT_IDS list
+                    if str(chat_id) in PRIVATE_CHAT_IDS and message.chat.type == 'private':
+                        logger.info(f"Special case: Downloading large video for privileged chat ID {chat_id} despite size: {filesize_mb:.1f}MB")
+                        await processing_msg.edit_text(
+                            f"🔄 Special download: Large video detected ({filesize_mb:.1f}MB). Downloading anyway...",
+                            parse_mode=ParseMode.MARKDOWN
+                        )
+                        
+                        # Create custom ydl_opts to bypass size check
+                        from video_downloader import yt_dlp
+                        import tempfile
+                        import os
+                        
+                        # Get temporary directory for download
+                        temp_dir = self.downloader.download_dir or tempfile.gettempdir()
+                        
+                        # Create ydl_opts similar to those in VideoDownloader
+                        ydl_opts = {
+                            'format': 'best[ext=mp4]/best',
+                            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                            'quiet': True,
+                            'no_warnings': True,
+                            'progress_hooks': [self.downloader.progress_hook]
+                        }
+                        
+                        try:
+                            # Download the video without size check
+                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                                info = ydl.extract_info(url, download=True)
+                                filename = ydl.prepare_filename(info)
+                                
+                                # Handle cases where the actual filename might be different
+                                if not os.path.exists(filename):
+                                    base_name = os.path.splitext(filename)[0]
+                                    for ext in ['.mp4', '.webm', '.mkv', '.avi', '.mov']:
+                                        test_path = base_name + ext
+                                        if os.path.exists(test_path):
+                                            filename = test_path
+                                            break
+                                
+                                if os.path.exists(filename):
+                                    actual_filesize = os.path.getsize(filename)
+                                    title = info.get('title', 'Unknown')
+                                    duration = info.get('duration', 'Unknown')
+                                    
+                                    # Create a result dictionary similar to what download_video returns
+                                    result = {
+                                        'filepath': filename,
+                                        'title': title,
+                                        'platform': platform,
+                                        'duration': duration,
+                                        'filesize': actual_filesize
+                                    }
+                                    logger.info(f"Special download complete - File: {filename}, Size: {actual_filesize / (1024*1024):.1f}MB")
+                                    
+                                    # Skip the return statement and continue processing to send the video
+                                    # The code will now proceed to the section that sends the video to the chat
+                                else:
+                                    # If download failed, show error message
+                                    await processing_msg.edit_text(
+                                        f"❌ Failed to download large video despite special permission."
+                                    )
+                                    return
+                        except Exception as e:
+                            logger.error(f"Error in special download: {str(e)}")
+                            await processing_msg.edit_text(
+                                f"❌ Error downloading large video: {str(e)}"
+                            )
+                            return
+                        
+                        # Skip the rest of the error handling and continue to send the video
+                        # This is crucial to ensure the video is sent to the chat
+                    else:
+                        # Normal case for other chats - show error message
+                        await processing_msg.edit_text(
+                            f"❌ {result['message']} Video size: {filesize_mb:.1f}MB (limit: 50MB)"
+                        )
+                        return
                 elif result['error'] == 'registered_users_only':
                     logger.warning(f"Content only available for registered users: {url}")
                     logger.info(f"Platform: {result.get('platform', 'Unknown')}")
                     await processing_msg.edit_text(
                         f"❌ {result['message']}"
                     )
+                    return
                 elif result['error'] == 'threads_screenshot_failed':
                     logger.warning(f"Failed to take screenshot of Threads post: {url}")
                     logger.info(f"Platform: {result.get('platform', 'Unknown')}")
                     await processing_msg.edit_text(
                         f"❌ {result['message']}"
                     )
+                    return
                 else:
                     logger.warning(f"Failed to download video from URL: {url}")
                     await processing_msg.edit_text(
                         f"❌ {result.get('message', 'Failed to download video. The video might be private, too large (>50MB), or not supported.')}"
                     )
-                return
+                    return
             elif not result:
                 logger.warning(f"Failed to download video from URL: {url}")
                 await processing_msg.edit_text(

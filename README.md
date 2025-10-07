@@ -137,6 +137,7 @@ Bot: [Sends video file with caption]
 |----------|-------------|----------|---------|
 | `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from BotFather | Yes | None |
 | `DOWNLOAD_DIR` | Directory to store temporary downloads | No | System temp directory |
+| `PRIVATE_CHAT_IDS` | Comma-separated list of private chat IDs that can download videos of any size (bypassing the 50MB limit) | No | Empty list |
 
 ### Advanced Configuration
 
@@ -256,6 +257,7 @@ pm2 start run_bot.py --interpreter python3
 ## Limitations
 
 - **File Size**: Maximum 50MB per video (Telegram limitation)
+  - *Note: Specific private chats can bypass this limit using the `PRIVATE_CHAT_IDS` environment variable*
 - **Platform Changes**: Video platforms may change APIs, requiring yt-dlp updates
 - **Rate Limiting**: Some platforms may rate-limit requests
 - **Geographic Restrictions**: Some videos may not be available in all regions
