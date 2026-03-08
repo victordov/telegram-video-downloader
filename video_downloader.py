@@ -373,6 +373,31 @@ class VideoDownloader:
                 if filesize is None:
                     filesize = 0
                     self.logger.warning("File size information not available")
+                
+                # For Twitter, the filesize estimate is often wrong. Try to get a better estimate
+                if platform == 'twitter' and filesize > 100 * 1024 * 1024:  # If estimate says > 100MB
+                    # Try to get filesize from the requested formats
+                    formats = info.get('formats', [])
+                    if formats:
+                        # Look for the best video format
+                        best_format = None
+                        for fmt in formats:
+                            if fmt.get('vcodec') != 'none' and fmt.get('acodec') != 'none':
+                                if best_format is None or fmt.get('filesize', 0) > best_format.get('filesize', 0):
+                                    best_format = fmt
+                        
+                        if best_format and best_format.get('filesize'):
+                            filesize = best_format['filesize']
+                            self.logger.info(f"Using better size estimate from format: {filesize / (1024*1024):.1f}MB")
+                
+                # If still too large, try calculating from bitrate and duration
+                if platform == 'twitter' and filesize > 100 * 1024 * 1024:
+                    duration = info.get('duration', 0)
+                    if duration:
+                        # Estimate based on typical Twitter video bitrate (around 2 Mbps for 1080p)
+                        estimated_bitrate = 2 * 1024 * 1024  # 2 Mbps in bytes per second
+                        filesize = duration * estimated_bitrate / 8  # Convert to bytes
+                        self.logger.info(f"Calculated size estimate from duration: {filesize / (1024*1024):.1f}MB")
 
                 self.logger.info(f"Estimated file size: {filesize / (1024*1024):.1f}MB")
 
@@ -434,13 +459,44 @@ class VideoDownloader:
                 self.logger.info(f"✅ Download successful for URL: {url}")
                 self.logger.info(f"Video details - Title: {title}, Platform: {platform}, Duration: {duration}s, Size: {actual_filesize / (1024*1024):.1f}MB")
 
+                # Try to determine video dimensions to preserve aspect ratio when sending via Telegram
+                width = info.get('width') or None
+                height = info.get('height') or None
+                # Fallback: inspect requested_formats or formats for dimensions
+                try:
+                    if (width is None or height is None) and isinstance(info.get('requested_formats'), list):
+                        for f in info['requested_formats']:
+                            if not width and f.get('width'):
+                                width = f.get('width')
+                            if not height and f.get('height'):
+                                height = f.get('height')
+                    if (width is None or height is None) and isinstance(info.get('formats'), list):
+                        # Prefer the selected format_id
+                        selected_id = info.get('format_id')
+                        for f in info['formats']:
+                            if selected_id and f.get('format_id') == selected_id:
+                                width = width or f.get('width')
+                                height = height or f.get('height')
+                                break
+                        # If still missing, take the best available non-audio format with dims
+                        if width is None or height is None:
+                            for f in reversed(info['formats']):
+                                if f.get('vcodec', 'none') != 'none' and f.get('width') and f.get('height'):
+                                    width = width or f.get('width')
+                                    height = height or f.get('height')
+                                    break
+                except Exception as _:
+                    pass
+
                 return {
                     'filepath': filename,
                     'title': title,
                     'platform': platform,
                     'duration': duration,
                     'filesize': actual_filesize,
-                    'url': url
+                    'url': url,
+                    'width': width,
+                    'height': height
                 }
 
         except Exception as e:

@@ -1,28 +1,59 @@
 """
-Telegram Bot for downloading and sharing videos from social media platforms
-Supports YouTube, Instagram, Facebook, TikTok, Twitter/X, and Threads
-Also supports taking screenshots of Threads posts when they're not videos
+Telegram Video Downloader Bot
+================================
+
+A robust Telegram bot that downloads videos from multiple social media platforms:
+- YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads
+
+Features:
+- Automatic platform detection
+- Video size estimation and validation
+- Smart file sending (video vs document based on size)
+- Retry logic for failed uploads
+- Comprehensive error handling
+- Support for privileged chats to bypass size limits
+
+Limitations:
+- Telegram has a 20-second upload timeout that effectively limits
+  practical file uploads to ~500MB despite API allowing up to 2GB
+- Videos >50MB are sent as documents
+- Privileged chats can bypass initial size check but still subject to timeout
 """
 
-import os
+import asyncio
 import logging
+import os
 import re
-from typing import Optional, List
-from telegram import Update, Message
-from telegram.ext import Application, MessageHandler, CommandHandler, ContextTypes, filters
-from telegram.constants import ParseMode
+import sys
+import tempfile
+from typing import List, Optional, Dict, Any
 from dotenv import load_dotenv
+from telegram import Update, Message
+from telegram.constants import ParseMode
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.error import TelegramError, TimedOut
 from video_downloader import VideoDownloader
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
+# Configure logging with better formatting
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    level=logging.INFO,
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Configure debug logging for specific modules
+logging.getLogger('httpx').setLevel(logging.WARNING)  # Reduce noise from httpx
+logging.getLogger('telegram.ext').setLevel(logging.WARNING)  # Reduce noise from telegram
+
+# Constants
+TELEGRAM_VIDEO_SIZE_LIMIT_MB = 50
+TELEGRAM_DOCUMENT_SIZE_LIMIT_MB = 2000  # 2GB
+UPLOAD_TIMEOUT_SECONDS = 20  # Telegram's hard timeout
+MAX_RETRIES = 2
 
 # Get private chat IDs from environment variable
 PRIVATE_CHAT_IDS = os.getenv('PRIVATE_CHAT_IDS', '').split(',')
@@ -30,18 +61,24 @@ PRIVATE_CHAT_IDS = os.getenv('PRIVATE_CHAT_IDS', '').split(',')
 PRIVATE_CHAT_IDS = [chat_id.strip() for chat_id in PRIVATE_CHAT_IDS if chat_id.strip()]
 logger.info(f"Loaded {len(PRIVATE_CHAT_IDS)} private chat IDs from environment variables")
 
+# Get download directory from environment variable
+DOWNLOAD_DIR = os.getenv('DOWNLOAD_DIR')
+# If not set, use system temp directory
+if not DOWNLOAD_DIR:
+    DOWNLOAD_DIR = tempfile.gettempdir()
+# Create directory if it doesn't exist
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+logger.info(f"Download directory configured: {DOWNLOAD_DIR}")
+
 
 class TelegramVideoBot:
-    """Telegram bot for downloading and sharing videos"""
-
+    """Telegram bot for downloading and sharing videos from social media platforms"""
+    
     def __init__(self, token: str):
-        """Initialize the bot
-
-        Args:
-            token: Telegram bot token
-        """
+        """Initialize the bot with token and downloader"""
         self.token = token
-        self.downloader = VideoDownloader()
+        self.downloader = VideoDownloader(download_dir=DOWNLOAD_DIR)
+        logger.info("Bot instance created successfully")
         self.application = None
         self.processed_messages = set()  # Track processed message IDs
 
@@ -151,6 +188,10 @@ I work in both private chats and group chats!
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming messages and process video URLs"""
         message = update.message
+        
+        # Skip if no message (e.g., edited message, channel post, etc.)
+        if not message:
+            return
 
         # Get chat information
         chat_type = message.chat.type
@@ -267,6 +308,16 @@ I work in both private chats and group chats!
                     
                     # Special case for private chats with IDs in the PRIVATE_CHAT_IDS list
                     if str(chat_id) in PRIVATE_CHAT_IDS and message.chat.type == 'private':
+                        # For Twitter, try to get a better file size estimate
+                        if result.get('platform') == 'twitter' and filesize_mb > 100:
+                            # Estimate based on duration (more accurate for Twitter)
+                            duration = result.get('duration', 0)
+                            if duration:
+                                # Based on actual Twitter downloads: ~8 MB per minute
+                                estimated_size_mb = duration * 8 / 60
+                                filesize_mb = estimated_size_mb
+                                logger.info(f"Corrected Twitter video size estimate: {filesize_mb:.1f}MB")
+                        
                         logger.info(f"Special case: Downloading large video for privileged chat ID {chat_id} despite size: {filesize_mb:.1f}MB")
                         await processing_msg.edit_text(
                             f"🔄 Special download: Large video detected ({filesize_mb:.1f}MB). Downloading anyway...",
@@ -311,12 +362,34 @@ I work in both private chats and group chats!
                                     duration = info.get('duration', 'Unknown')
                                     
                                     # Create a result dictionary similar to what download_video returns
+                                    # Extract dimensions if available to help Telegram keep correct aspect ratio
+                                    width = info.get('width') or None
+                                    height = info.get('height') or None
+                                    try:
+                                        if (width is None or height is None) and isinstance(info.get('requested_formats'), list):
+                                            for f in info['requested_formats']:
+                                                if not width and f.get('width'):
+                                                    width = f.get('width')
+                                                if not height and f.get('height'):
+                                                    height = f.get('height')
+                                        if (width is None or height is None) and isinstance(info.get('formats'), list):
+                                            selected_id = info.get('format_id')
+                                            for f in info['formats']:
+                                                if selected_id and f.get('format_id') == selected_id:
+                                                    width = width or f.get('width')
+                                                    height = height or f.get('height')
+                                                    break
+                                    except Exception:
+                                        pass
+
                                     result = {
                                         'filepath': filename,
                                         'title': title,
                                         'platform': platform,
                                         'duration': duration,
-                                        'filesize': actual_filesize
+                                        'filesize': actual_filesize,
+                                        'width': width,
+                                        'height': height
                                     }
                                     logger.info(f"Special download complete - File: {filename}, Size: {actual_filesize / (1024*1024):.1f}MB")
                                     
@@ -395,27 +468,24 @@ I work in both private chats and group chats!
                 logger.info(f"Duration: {result.get('duration', 'Unknown')}s")
 
                 # Send the video file
-                with open(result['filepath'], 'rb') as video_file:
-                    caption = f"🎥 *{result['title']}*\n\n📱 Platform: {result['platform'].title()}"
-                    if result.get('duration'):
-                        caption += f"\n⏱️ Duration: {result['duration']}s"
-                    caption += f"\n📊 Size: {result['filesize'] / (1024*1024):.1f}MB"
-
-                    logger.info(f"Sending video to chat: {chat_title} (ID: {chat_id})")
-                    await message.reply_video(
-                        video=video_file,
-                        caption=caption,
-                        parse_mode=ParseMode.MARKDOWN
-                    )
-
-            # Delete processing message
-            await processing_msg.delete()
-
-            # Clean up downloaded file
-            logger.info(f"Cleaning up file: {result['filepath']}")
-            self.downloader.cleanup_file(result['filepath'])
-
-            logger.info(f"Successfully processed video: {result['title']} from {platform}")
+                logger.info(f"Sending video to chat: {chat_title} (ID: {chat_id})")
+                
+                # Send video with retry logic
+                success = await self._send_video_with_retry(message, result, processing_msg)
+                
+                if success:
+                    # Delete processing message
+                    await processing_msg.delete()
+                    
+                    # Clean up downloaded file
+                    logger.info(f"Cleaning up file: {result['filepath']}")
+                    self.downloader.cleanup_file(result['filepath'])
+                    
+                    logger.info(f"Successfully processed video: {result['title']} from {platform}")
+                else:
+                    # Still clean up on failure
+                    logger.info(f"Cleaning up file after failed send: {result['filepath']}")
+                    self.downloader.cleanup_file(result['filepath'])
 
         except Exception as e:
             logger.error(f"Error processing video {url}: {str(e)}")
@@ -423,74 +493,215 @@ I work in both private chats and group chats!
                 "❌ An error occurred while processing the video. Please try again later."
             )
 
+    async def _send_video_with_retry(self, message: Message, result: Dict[str, Any], processing_msg) -> bool:
+        """Send video to chat with retry logic and proper error handling"""
+        file_size_mb = result['filesize'] / (1024 * 1024)
+        
+        # Determine send method based on file size
+        if file_size_mb > TELEGRAM_VIDEO_SIZE_LIMIT_MB:
+            return await self._send_as_document(message, result, processing_msg, file_size_mb)
+        else:
+            return await self._send_as_video(message, result, processing_msg, file_size_mb)
+    
+    async def _send_as_document(self, message: Message, result: Dict[str, Any], processing_msg, file_size_mb: float) -> bool:
+        """Send file as document with proper error handling"""
+        caption = self._create_caption(result, file_size_mb, is_document=True)
+        
+        logger.info(f"Attempting to send document: {file_size_mb:.1f}MB")
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Check if file is too large for practical upload
+                if file_size_mb > 500:  # Files over 500MB likely won't upload within 20s timeout
+                    logger.warning(f"File {file_size_mb:.1f}MB exceeds practical upload limit")
+                    await processing_msg.edit_text(
+                        f"⚠️ File too large ({file_size_mb:.1f}MB). Telegram's 20-second timeout prevents uploading files >500MB.\n\n"
+                        f"Consider downloading a smaller video."
+                    )
+                    return False
+                
+                # Try to send with short timeout
+                await asyncio.wait_for(
+                    message.reply_document(
+                        document=result['filepath'],
+                        caption=caption,
+                        parse_mode=ParseMode.MARKDOWN
+                    ),
+                    timeout=UPLOAD_TIMEOUT_SECONDS
+                )
+                logger.info(f"Document sent successfully on attempt {attempt + 1}")
+                return True
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"Upload attempt {attempt + 1} timed out after {UPLOAD_TIMEOUT_SECONDS}s")
+                if attempt == MAX_RETRIES - 1:
+                    await processing_msg.edit_text(
+                        f"❌ Upload failed after {MAX_RETRIES} attempts. File too large for Telegram's servers.\n\n"
+                        f"Try a smaller video (<500MB)."
+                    )
+                    return False
+                await asyncio.sleep(1)  # Brief delay before retry
+                
+            except TimedOut as e:
+                logger.error(f"Telegram API timeout: {str(e)}")
+                await processing_msg.edit_text(
+                    f"❌ Telegram server timeout. The file ({file_size_mb:.1f}MB) is too large.\n\n"
+                    f"Try a smaller video."
+                )
+                return False
+                
+            except Exception as e:
+                logger.error(f"Unexpected error sending document: {str(e)}", exc_info=True)
+                if attempt == MAX_RETRIES - 1:
+                    await processing_msg.edit_text(f"❌ Failed to send file: {str(e)}")
+                    return False
+                await asyncio.sleep(1)
+        
+        return False
+    
+    async def _send_as_video(self, message: Message, result: Dict[str, Any], processing_msg, file_size_mb: float) -> bool:
+        """Send file as video with proper parameters"""
+        caption = self._create_caption(result, file_size_mb, is_document=False)
+        
+        # Prepare video parameters
+        send_kwargs = {
+            'video': result['filepath'],
+            'caption': caption,
+            'parse_mode': ParseMode.MARKDOWN,
+            'supports_streaming': True
+        }
+        
+        # Add duration if available
+        if result.get('duration'):
+            send_kwargs['duration'] = int(result['duration'])
+        
+        # Add dimensions if available
+        if result.get('width') and result.get('height'):
+            try:
+                send_kwargs['width'] = int(result['width'])
+                send_kwargs['height'] = int(result['height'])
+            except (ValueError, TypeError):
+                logger.warning("Invalid video dimensions, skipping")
+        
+        try:
+            await message.reply_video(**send_kwargs)
+            logger.info(f"Video sent successfully: {file_size_mb:.1f}MB")
+            return True
+        except Exception as e:
+            logger.error(f"Error sending video: {str(e)}", exc_info=True)
+            await processing_msg.edit_text(f"❌ Failed to send video: {str(e)}")
+            return False
+    
+    def _create_caption(self, result: Dict[str, Any], file_size_mb: float, is_document: bool = False) -> str:
+        """Create formatted caption for video/document"""
+        icon = "📁" if is_document else "🎥"
+        caption = f"{icon} *{result['title']}*\n\n📱 Platform: {result['platform'].title()}"
+        
+        if result.get('duration'):
+            minutes = int(result['duration']) // 60
+            seconds = int(result['duration']) % 60
+            caption += f"\n⏱️ Duration: {minutes}:{seconds:02d}"
+        
+        caption += f"\n📊 Size: {file_size_mb:.1f}MB"
+        
+        if is_document:
+            caption += "\n\n⚠️ Sent as document due to large size"
+        
+        return caption
+
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle errors"""
-        logger.error(f"Update {update} caused error {context.error}")
+        """Handle errors with detailed logging"""
+        logger.error(f"Error in update {update.update_id}: {context.error}", exc_info=True)
+        
+        # Extract additional error details
+        error = context.error
+        if isinstance(error, TelegramError):
+            logger.error(f"Telegram error details: {error.to_dict() if hasattr(error, 'to_dict') else str(error)}")
+        
+        # Try to notify user if possible
+        if update and update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    "❌ An unexpected error occurred. Please try again later."
+                )
+            except Exception:
+                logger.warning("Could not send error message to user")
 
     def run(self) -> None:
-        """Start the bot"""
+        """Start the bot with proper configuration"""
         logger.info("Initializing Telegram Video Bot...")
-
-        # Create application
-        self.application = Application.builder().token(self.token).build()
-        logger.info("Application created with token")
-
-        # Add handlers
-        logger.info("Registering command handlers...")
+        
+        try:
+            # Create application with optimized settings
+            self.application = (
+                Application.builder()
+                .token(self.token)
+                .connect_timeout(60)
+                .read_timeout(600)  # 10 minutes for downloads
+                .write_timeout(600)  # 10 minutes for uploads
+                .pool_timeout(60)
+                .get_updates_connect_timeout(60)
+                .get_updates_read_timeout(60)
+                .get_updates_write_timeout(60)
+                .connection_pool_size(8)
+                .build()
+            )
+            logger.info("Application created with optimized timeouts")
+            
+            # Register handlers
+            self._register_handlers()
+            
+            # Start the bot
+            logger.info("Starting bot polling...")
+            self.application.run_polling(drop_pending_updates=True)
+            
+        except Exception as e:
+            logger.error(f"Failed to start bot: {str(e)}", exc_info=True)
+            raise
+        finally:
+            logger.info("Bot shutdown complete")
+    
+    def _register_handlers(self) -> None:
+        """Register all command and message handlers"""
+        logger.info("Registering handlers...")
+        
+        # Command handlers
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
-
-        # Handle text messages in private chats
-        logger.info("Registering message handlers for private chats...")
-        self.application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-            self.handle_message
-        ))
-
-        # Handle text messages in group chats
-        logger.info("Registering message handlers for group chats...")
-        self.application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
-            self.handle_message
-        ))
-
-        # Add error handler
-        logger.info("Registering error handler...")
+        
+        # Message handler for all text messages
+        self.application.add_handler(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message)
+        )
+        
+        # Error handler
         self.application.add_error_handler(self.error_handler)
-
-        # Start the bot
-        logger.info("Starting Telegram Video Bot...")
-        try:
-            self.application.run_polling(allowed_updates=Update.ALL_TYPES)
-            logger.info("Bot polling stopped")
-        except Exception as e:
-            logger.error(f"Error running bot: {str(e)}")
-        finally:
-            logger.info("Bot shutdown complete")
-
+        
+        logger.info("All handlers registered successfully")
 
 def main():
-    """Main function to run the bot"""
-    logger.info("Starting main function")
+    """Main entry point for the bot"""
+    try:
+        # Get and validate bot token
+        token = os.getenv('TELEGRAM_BOT_TOKEN')
+        if not token:
+            logger.error("TELEGRAM_BOT_TOKEN environment variable not set")
+            sys.exit(1)
+        
+        # Create and run bot
+        logger.info("Creating bot instance...")
+        bot = TelegramVideoBot(token)
+        
+        logger.info("Starting bot...")
+        bot.run()
+        
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error in main: {str(e)}", exc_info=True)
+        sys.exit(1)
 
-    # Get bot token from environment variable
-    logger.info("Retrieving bot token from environment variables")
-    token = os.getenv('TELEGRAM_BOT_TOKEN')
 
-    if not token:
-        logger.error("TELEGRAM_BOT_TOKEN environment variable not set!")
-        logger.error("Please create a .env file with your bot token:")
-        logger.error("TELEGRAM_BOT_TOKEN=your_bot_token_here")
-        return
-
-    # Create and run bot
-    logger.info("Creating bot instance")
-    bot = TelegramVideoBot(token)
-    logger.info("Running bot")
-    bot.run()
-    logger.info("Main function completed")
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

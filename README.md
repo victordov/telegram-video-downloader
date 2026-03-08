@@ -59,16 +59,33 @@ pip install -r requirements.txt
 ### 4. Configure the Bot
 
 1. Copy the example environment file:
+
    ```bash
    cp .env.example .env
    ```
 
 2. Edit the `.env` file and add your bot token:
-   ```
+
+   ```env
    TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
    ```
 
-3. **Important for Group Chats**: Disable Privacy Mode
+3. (Optional) Set a custom download directory:
+
+   ```env
+   # Videos will be downloaded to this folder
+   # If not set, uses the system temp directory
+   DOWNLOAD_DIR=/Users/yourname/downloads/telegram-videos
+   ```
+
+4. (Optional) Add private chat IDs for size limit bypass:
+
+   ```env
+   # These chat IDs can download videos larger than 50MB
+   PRIVATE_CHAT_IDS=123456789,987654321
+   ```
+
+5. **Important for Group Chats**: Disable Privacy Mode
    - Chat with @BotFather again
    - Send the command `/mybots`
    - Select your bot
