@@ -290,6 +290,8 @@ class VideoDownloader:
             },
             'tiktok': {
                 'format': 'best[filesize<50M]/best',
+                # Reset http_headers so yt-dlp's native JS challenge solver uses its own UA
+                'http_headers': {},
             },
             'facebook': {
                 'format': 'best[filesize<50M]/best',
@@ -301,7 +303,14 @@ class VideoDownloader:
 
         if platform in platform_opts:
             self.logger.debug(f"Applying platform-specific options for {platform}: {platform_opts[platform]}")
-            base_opts.update(platform_opts[platform])
+            opts = platform_opts[platform]
+            # Merge http_headers instead of overwriting
+            if 'http_headers' in opts:
+                base_opts['http_headers'].update(opts.pop('http_headers'))
+            # Merge extractor_args instead of overwriting
+            if 'extractor_args' in opts:
+                base_opts.setdefault('extractor_args', {}).update(opts.pop('extractor_args'))
+            base_opts.update(opts)
         else:
             self.logger.debug(f"No platform-specific options found for {platform}, using base options")
 
@@ -412,9 +421,10 @@ class VideoDownloader:
                         'duration': duration
                     }
 
-                # Download the video
+                # Download the video by reusing already-fetched info to avoid
+                # re-requesting the webpage (which causes 403 on TikTok's JS challenge).
                 self.logger.info(f"Starting download of {title} from {platform}")
-                ydl.download([url])
+                ydl.process_info(dict(info))
 
                 # Get the downloaded file path
                 filename = ydl.prepare_filename(info)

@@ -611,7 +611,8 @@ I work in both private chats and group chats!
 
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle errors with detailed logging"""
-        logger.error(f"Error in update {update.update_id}: {context.error}", exc_info=True)
+        update_id = update.update_id if update else "N/A"
+        logger.error(f"Error in update {update_id}: {context.error}", exc_info=True)
         
         # Extract additional error details
         error = context.error
