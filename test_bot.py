@@ -4,17 +4,30 @@ Tests message handling and URL detection without requiring a real bot token
 """
 
 import asyncio
-import tempfile
-import os
 from unittest.mock import Mock, AsyncMock
 from telegram_bot import TelegramVideoBot
 
 
+class MockChat:
+    """Minimal chat object used by bot handlers."""
+    def __init__(self, chat_id: int = 123456, chat_type: str = "private", title: str = None):
+        self.id = chat_id
+        self.type = chat_type
+        self.title = title
+
+
+class MockUser:
+    """Minimal user object used by bot handlers."""
+    def __init__(self, user_id: int = 999999):
+        self.id = user_id
+
+
 class MockMessage:
     """Mock Telegram message for testing"""
-    def __init__(self, text: str, message_id: int = 1):
+    def __init__(self, text: str, message_id: int = 1, chat: MockChat = None):
         self.text = text
         self.message_id = message_id
+        self.chat = chat or MockChat()
         self.reply_text = AsyncMock()
         self.reply_video = AsyncMock()
         self.delete = AsyncMock()
@@ -22,8 +35,11 @@ class MockMessage:
 
 class MockUpdate:
     """Mock Telegram update for testing"""
-    def __init__(self, message: MockMessage):
+    def __init__(self, message: MockMessage, user: MockUser = None):
         self.message = message
+        self.effective_message = message
+        self.effective_chat = message.chat
+        self.effective_user = user or MockUser()
 
 
 async def test_bot_functionality():
@@ -40,6 +56,7 @@ async def test_bot_functionality():
         "Multiple URLs: https://youtu.be/abc123 and https://www.instagram.com/p/example/",
         "No URLs in this message",
         "Mixed content with https://www.tiktok.com/@user/video/123 and some text",
+        "Here is a 9GAG post: https://9gag.com/gag/avyKyAd",
         "Non-video URL: https://www.google.com"
     ]
     
@@ -144,6 +161,10 @@ def test_url_patterns():
         ("https://www.facebook.com/watch/?v=123456789", "facebook"),
         ("https://fb.watch/abc123def/", "facebook"),
         
+        # 9GAG
+        ("https://9gag.com/gag/avyKyAd", "9gag"),
+        ("https://www.9gag.com/gag/aB12CdE", "9gag"),
+
         # Non-video URLs
         ("https://www.google.com", None),
         ("https://www.twitter.com/user/status/123", None),

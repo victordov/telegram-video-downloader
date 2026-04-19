@@ -1,10 +1,10 @@
 # Telegram Video Downloader Bot
 
-A powerful Telegram bot that automatically detects video links from popular social media platforms (YouTube, Instagram, Facebook, TikTok, and Twitter/X.com) in chat messages, downloads the videos, and shares them back to the chat.
+A powerful Telegram bot that automatically detects video links from popular social media platforms (YouTube, Instagram, Facebook, TikTok, Twitter/X.com, and 9GAG) in chat messages, downloads the videos, and shares them back to the chat.
 
 ## Features
 
-- **Multi-Platform Support**: Downloads videos from YouTube, Instagram, Facebook, TikTok, and Twitter/X.com
+- **Multi-Platform Support**: Downloads videos from YouTube, Instagram, Facebook, TikTok, Twitter/X.com, Threads, and 9GAG
 - **Automatic Detection**: Automatically detects video URLs in messages
 - **Works Everywhere**: Functions in both private chats and group chats
 - **Smart Processing**: Only processes new messages after the bot is added to prevent spam
@@ -21,6 +21,8 @@ A powerful Telegram bot that automatically detects video links from popular soci
 | **TikTok** | `tiktok.com/@user/video/`, `vm.tiktok.com/`, `tiktok.com/t/` |
 | **Facebook** | `facebook.com/watch/`, `facebook.com/videos/`, `fb.watch/` |
 | **Twitter/X.com** | `twitter.com/username/status/`, `x.com/username/status/`, `t.co/` |
+| **Threads** | `threads.com/@.../post/`, `threads.net/@.../post/` |
+| **9GAG** | `9gag.com/gag/<post_id>` |
 
 ## Requirements
 
@@ -298,6 +300,10 @@ Contributions are welcome! Please:
 ### Version 1.1.0
 - Added support for Twitter/X.com videos
 - Updated documentation to reflect new platform support
+
+### Version 1.2.0
+- Added support for 9GAG post video URLs
+- Added fallback extraction for direct MP4 links on 9GAG pages
 
 ### Version 1.0.0
 - Initial release

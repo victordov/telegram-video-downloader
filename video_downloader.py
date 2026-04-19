@@ -1,6 +1,6 @@
 """
 Video downloader module using yt-dlp for multiple platforms
-Supports YouTube, Instagram, Facebook, TikTok, Twitter/X, and Threads
+Supports YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, and 9GAG
 Also supports taking screenshots of Threads posts when they're not videos
 """
 
@@ -10,6 +10,8 @@ import tempfile
 import logging
 import time
 from typing import Optional, Dict, Any
+from urllib.parse import urlparse
+import requests
 import yt_dlp
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -53,6 +55,9 @@ class VideoDownloader:
         'threads': [
             r'(?:https?://)?(?:www\.)?threads\.com/@[^/]+/post/([a-zA-Z0-9_-]+)',
             r'(?:https?://)?(?:www\.)?threads\.net/@[^/]+/post/([a-zA-Z0-9_-]+)'
+        ],
+        '9gag': [
+            r'(?:https?://)?(?:www\.)?9gag\.com/gag/([a-zA-Z0-9]+)'
         ]
     }
 
@@ -129,7 +134,7 @@ class VideoDownloader:
             return False
 
         # For platforms that always contain videos
-        if platform in ['youtube', 'tiktok', 'facebook', 'twitter']:
+        if platform in ['youtube', 'tiktok', 'facebook', 'twitter', '9gag']:
             self.logger.info(f"✅ Platform {platform} typically contains videos: {url}")
             return True
 
@@ -298,6 +303,9 @@ class VideoDownloader:
             },
             'twitter': {
                 'format': 'best[filesize<50M]/best',
+            },
+            '9gag': {
+                'format': 'best[ext=mp4][filesize<50M]/best[filesize<50M]/best',
             }
         }
 
@@ -553,7 +561,154 @@ class VideoDownloader:
                         'message': 'Failed to take screenshot of Threads post.'
                     }
 
+            # 9GAG fallback: try extracting a direct MP4 URL from the page and download it.
+            if platform == '9gag':
+                self.logger.info("Attempting 9GAG direct MP4 fallback")
+                try:
+                    mp4_url = self._extract_9gag_mp4_url(url)
+                    if mp4_url:
+                        return self._download_direct_media(mp4_url, source_url=url, platform='9gag')
+                    return {
+                        'error': 'no_video_found',
+                        'message': 'No downloadable video was found on this 9GAG post.'
+                    }
+                except Exception as fallback_error:
+                    self.logger.error(f"9GAG fallback failed for {url}: {str(fallback_error)}")
+                    return None
+
             return None
+
+    def _extract_9gag_post_id(self, url: str) -> Optional[str]:
+        """Extract 9GAG post ID from a /gag/{id} URL."""
+        match = re.search(r'(?:https?://)?(?:www\.)?9gag\.com/gag/([a-zA-Z0-9]+)', url, re.IGNORECASE)
+        return match.group(1) if match else None
+
+    def _normalize_escaped_url(self, raw_url: str) -> str:
+        """Normalize escaped URL fragments found in embedded JSON."""
+        normalized = raw_url.strip().replace('\\/', '/')
+        normalized = normalized.replace('\\u002F', '/')
+        normalized = normalized.replace('&amp;', '&')
+        return normalized
+
+    def _extract_9gag_mp4_url(self, url: str) -> Optional[str]:
+        """Extract a direct MP4 URL from a 9GAG post page using metadata and JSON fallbacks."""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Referer': 'https://9gag.com/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9'
+        }
+        post_id = self._extract_9gag_post_id(url)
+        derived_candidates = []
+        if post_id:
+            derived_candidates = [
+                f"https://img-9gag-fun.9cache.com/photo/{post_id}_460svav1.mp4",
+                f"https://img-9gag-fun.9cache.com/photo/{post_id}_460sv.mp4",
+                f"https://img-9gag-fun.9cache.com/photo/{post_id}_700b.mp4"
+            ]
+
+        html = None
+        for page_url in [url, url.replace('://9gag.com', '://www.9gag.com')]:
+            try:
+                response = requests.get(page_url, headers=headers, timeout=20)
+                response.raise_for_status()
+                html = response.text
+                break
+            except Exception as exc:
+                self.logger.warning(f"Could not fetch 9GAG page HTML from {page_url}: {str(exc)}")
+
+        if html:
+            meta_patterns = [
+                r'<meta[^>]+property=["\']og:video(?::url)?["\'][^>]+content=["\']([^"\']+\.mp4[^"\']*)["\']',
+                r'<meta[^>]+name=["\']twitter:player:stream["\'][^>]+content=["\']([^"\']+\.mp4[^"\']*)["\']',
+                r'<source[^>]+src=["\']([^"\']+\.mp4[^"\']*)["\']'
+            ]
+
+            for pattern in meta_patterns:
+                match = re.search(pattern, html, re.IGNORECASE)
+                if match:
+                    return self._normalize_escaped_url(match.group(1))
+
+            json_url_match = re.search(r'https:\\/\\/[^"\']+\\.mp4[^"\']*', html)
+            if json_url_match:
+                return self._normalize_escaped_url(json_url_match.group(0))
+
+        for candidate in derived_candidates:
+            try:
+                probe = requests.head(candidate, headers=headers, timeout=10, allow_redirects=True)
+                if probe.ok:
+                    return candidate
+            except Exception:
+                continue
+
+        # Final fallback: return first derived candidate and let direct download validate it.
+        if derived_candidates:
+            return derived_candidates[0]
+
+        return None
+
+    def _download_direct_media(self, media_url: str, source_url: str, platform: str) -> Optional[Dict[str, Any]]:
+        """Download a direct media URL and return a result object compatible with bot sending logic."""
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                          '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Referer': 'https://9gag.com/',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9'
+        }
+
+        parsed = urlparse(media_url)
+        basename = os.path.basename(parsed.path) or f"{platform}_video.mp4"
+        if not basename.lower().endswith('.mp4'):
+            basename = f"{basename}.mp4"
+
+        timestamp = int(time.time())
+        filename = os.path.join(self.download_dir, f"{timestamp}_{basename}")
+
+        response = requests.get(media_url, headers=headers, timeout=30, stream=True)
+        response.raise_for_status()
+
+        content_length = int(response.headers.get('Content-Length', 0) or 0)
+        if content_length > 50 * 1024 * 1024:
+            return {
+                'error': 'file_too_large',
+                'message': 'Video file is too large to download (limit: 50MB)',
+                'filesize': content_length,
+                'title': basename,
+                'platform': platform,
+                'duration': None
+            }
+
+        written = 0
+        with open(filename, 'wb') as output_file:
+            for chunk in response.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                output_file.write(chunk)
+                written += len(chunk)
+                if written > 50 * 1024 * 1024:
+                    output_file.close()
+                    self.cleanup_file(filename)
+                    return {
+                        'error': 'file_too_large',
+                        'message': 'Video file is too large to download (limit: 50MB)',
+                        'filesize': written,
+                        'title': basename,
+                        'platform': platform,
+                        'duration': None
+                    }
+
+        return {
+            'filepath': filename,
+            'title': os.path.splitext(basename)[0],
+            'platform': platform,
+            'duration': None,
+            'filesize': written,
+            'url': source_url,
+            'width': None,
+            'height': None
+        }
 
     def take_screenshot(self, url: str) -> Optional[Dict[str, Any]]:
         """Take a screenshot of a web page
@@ -828,6 +983,7 @@ def test_downloader():
         "https://twitter.com/username/status/1234567890",  # Twitter (example)
         "https://x.com/username/status/1234567890",  # X.com (example)
         "https://t.co/abcdef123",  # Twitter shortened URL (example)
+        "https://www.9gag.com/gag/avyKyAd",  # 9GAG (example)
         "https://example.com/not-a-video"  # Not a video URL
     ]
 

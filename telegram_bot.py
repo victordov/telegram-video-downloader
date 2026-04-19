@@ -3,7 +3,7 @@ Telegram Video Downloader Bot
 ================================
 
 A robust Telegram bot that downloads videos from multiple social media platforms:
-- YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads
+- YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, 9GAG
 
 Features:
 - Automatic platform detection
@@ -99,6 +99,7 @@ I can download videos from:
 • TikTok
 • Twitter/X
 • Threads (screenshots for non-video posts)
+• 9GAG
 
 In private chats: All videos are downloaded automatically!
 In group chats: 
@@ -129,12 +130,13 @@ I work in both private chats and group chats!
    • TikTok (tiktok.com, vm.tiktok.com)
    • Twitter/X (twitter.com, x.com, t.co)
    • Threads (threads.com, threads.net)
+   • 9GAG (9gag.com/gag/...)
 
 2. Video download behavior:
    • In private chats: All videos are downloaded automatically
    • In group chats:
      - TikTok videos are downloaded automatically
-     - For other platforms (YouTube, Instagram, Facebook, Twitter/X, Threads), add #download tag to your message
+     - For other platforms (YouTube, Instagram, Facebook, Twitter/X, Threads, 9GAG), add #download tag to your message
 
 3. The video will be shared back to the chat
    • For Threads posts that are not videos, a screenshot will be taken and shared as a photo
@@ -168,7 +170,7 @@ I work in both private chats and group chats!
 
 ✅ Bot is running
 📁 Downloads processed: {len(self.processed_messages)}
-🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads
+🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, 9GAG
         """
         logger.info(f"Sending status message to user {user.id} in chat {chat_id} (downloads processed: {len(self.processed_messages)})")
         await update.message.reply_text(status_message, parse_mode=ParseMode.MARKDOWN)
