@@ -1,12 +1,18 @@
 """
 Deterministic regression test for Twitter/X playlist-style extractor results.
+
+Twitter tweets with several clips come back as a ``_type: playlist`` info dict.
+Handing that straight to ``process_info`` fails, so the downloader normalizes it
+to the first entry and picks a variant that fits under the size limit.
 """
 
 import os
-import tempfile
+
 from unittest.mock import patch
 
-from video_downloader import VideoDownloader
+from video_downloader import MB, VideoDownloader
+
+TWEET_URL = 'https://x.com/user/status/1234567890123456789'
 
 
 class FakeTwitterYDL:
@@ -31,7 +37,7 @@ class FakeTwitterYDL:
                     'duration': 7,
                     'ext': 'mp4',
                     'format_id': 'http-10368',
-                    'filesize_approx': 52 * 1024 * 1024,
+                    'filesize_approx': 52 * MB,
                     'formats': [
                         {
                             'format_id': 'http-2176',
@@ -41,7 +47,7 @@ class FakeTwitterYDL:
                             'acodec': 'aac',
                             'protocol': 'https',
                             'ext': 'mp4',
-                            'filesize_approx': 21 * 1024 * 1024,
+                            'filesize_approx': 21 * MB,
                             'tbr': 2176,
                         },
                         {
@@ -52,7 +58,7 @@ class FakeTwitterYDL:
                             'acodec': 'aac',
                             'protocol': 'https',
                             'ext': 'mp4',
-                            'filesize_approx': 52 * 1024 * 1024,
+                            'filesize_approx': 52 * MB,
                             'tbr': 10368,
                         }
                     ]
@@ -67,7 +73,7 @@ class FakeTwitterYDL:
         }
 
     def process_info(self, info):
-        # Simulate yt-dlp behavior where passing playlist dict to process_info fails.
+        # Simulate yt-dlp behavior where passing a playlist dict to process_info fails.
         if info.get('_type') == 'playlist':
             raise Exception('')
 
@@ -77,34 +83,57 @@ class FakeTwitterYDL:
             output.write(b'fake-twitter-video')
 
     def prepare_filename(self, info):
-        outtmpl = self.opts['outtmpl']
-        filename = outtmpl.replace('%(title)s', info.get('title', 'Unknown'))
-        filename = filename.replace('%(ext)s', info.get('ext', 'mp4'))
-        return filename
+        directory = os.path.dirname(self.opts['outtmpl'])
+        return os.path.join(
+            directory,
+            f"{info.get('title', 'Unknown')} [{info.get('id', 'x')}].{info.get('ext', 'mp4')}"
+        )
 
 
-def test_twitter_playlist_download_uses_entry_info():
-    test_dir = tempfile.mkdtemp()
-    downloader = VideoDownloader(download_dir=test_dir)
-
+def test_playlist_result_downloads_the_first_entry(download_dir):
+    downloader = VideoDownloader(download_dir=download_dir)
     try:
         with patch('video_downloader.yt_dlp.YoutubeDL', FakeTwitterYDL):
-            result = downloader.download_video('https://x.com/user/status/1234567890123456789')
+            result = downloader.download_video(TWEET_URL)
 
-        assert result is not None
-        assert result.get('platform') == 'twitter'
-        assert result.get('title') == 'clip one'
-        assert result.get('duration') == 7
-        assert result.get('filesize') == len(b'fake-twitter-video')
+        assert result is not None and 'error' not in result
+        assert result['platform'] == 'twitter'
+        assert result['title'] == 'clip one'
+        assert result['duration'] == 7
+        assert result['filesize'] == len(b'fake-twitter-video')
         assert os.path.exists(result['filepath'])
     finally:
-        if 'result' in locals() and result and result.get('filepath'):
-            downloader.cleanup_file(result['filepath'])
-        if os.path.exists(test_dir):
-            os.rmdir(test_dir)
+        downloader.close()
 
 
-if __name__ == '__main__':
-    test_twitter_playlist_download_uses_entry_info()
-    print('Twitter playlist regression test passed')
+def test_oversized_variant_is_swapped_for_one_that_fits(download_dir):
+    """The 52MB variant is over the limit, so the 21MB one is selected instead."""
+    downloader = VideoDownloader(download_dir=download_dir)
+    try:
+        with patch('video_downloader.yt_dlp.YoutubeDL', FakeTwitterYDL):
+            result = downloader.download_video(TWEET_URL)
 
+        assert result is not None and 'error' not in result
+        # The optimizer swaps in the 720x1280 variant's metadata.
+        assert (result['width'], result['height']) == (720, 1280)
+    finally:
+        downloader.close()
+
+
+def test_size_estimate_prefers_the_smallest_credible_candidate(download_dir):
+    downloader = VideoDownloader(download_dir=download_dir)
+    try:
+        entry = {
+            'duration': 60,
+            'filesize_approx': 500 * MB,
+            'format_id': 'http-2176',
+            'tbr': 2176,
+            'formats': [{'format_id': 'http-2176', 'filesize_approx': 21 * MB, 'tbr': 2176}],
+        }
+        estimate = downloader._estimate_filesize('twitter', entry)
+        # The 500MB "approx" figure is discarded in favour of the smallest
+        # credible candidate: duration x bitrate (60s at 2176 kbps).
+        assert estimate == int(60 * 2176 * 1000 / 8)
+        assert estimate < 21 * MB
+    finally:
+        downloader.close()

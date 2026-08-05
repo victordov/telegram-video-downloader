@@ -7,11 +7,15 @@
 - pip package manager
 - Internet connection
 - Telegram account
+- `ffmpeg` (strongly recommended: enables merged video+audio downloads and thumbnails)
+- Chrome + chromedriver (optional: only used for Threads screenshots)
 
 ### Setup
 1. Install dependencies: `pip install -r requirements.txt`
-2. Configure bot token in `.env`
-3. Run: `python run_bot.py`
+2. Install ffmpeg: `brew install ffmpeg` / `sudo apt install ffmpeg`
+3. Configure bot token in `.env` (see `.env.example` for every setting)
+4. Run: `python run_bot.py` — the pre-flight check reports what is missing
+5. Run the tests: `pip install -r requirements-dev.txt && pytest`
 
 ## Production Deployment
 
@@ -75,55 +79,17 @@ sudo systemctl status telegram-video-bot
 
 ### Option 2: Docker Deployment
 
-#### Dockerfile
-```dockerfile
-FROM python:3.11-slim
+A ready-to-use `Dockerfile` and `docker-compose.yml` ship with the repository.
 
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY . .
-
-# Create non-root user
-RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
-USER botuser
-
-# Run the bot
-CMD ["python", "run_bot.py"]
-```
-
-#### Docker Compose
-```yaml
-version: '3.8'
-
-services:
-  telegram-video-bot:
-    build: .
-    environment:
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-    volumes:
-      - ./downloads:/app/downloads
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-```
-
-Build and run:
 ```bash
-docker-compose up -d
+cp .env.example .env   # add your token
+docker compose up -d
+docker compose logs -f
 ```
+
+The compose file mounts `./downloads` as the staging directory and pins
+`DOWNLOAD_DIR` to it, so nothing accumulates inside the container layer.
+ffmpeg is installed in the image, so merged downloads and thumbnails work.
 
 ### Option 3: Heroku Deployment
 
@@ -183,20 +149,34 @@ services:
 ## Monitoring and Maintenance
 
 ### Logging
-The bot includes built-in logging. For production, consider:
+Logging is configured from the environment; no code changes are needed:
 
-```python
-# Enhanced logging configuration
-import logging
-from logging.handlers import RotatingFileHandler
-
-# Setup rotating file handler
-handler = RotatingFileHandler('bot.log', maxBytes=10*1024*1024, backupCount=5)
-handler.setFormatter(logging.Formatter(
-    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-))
-logging.getLogger().addHandler(handler)
+```env
+LOG_LEVEL=INFO      # DEBUG, INFO, WARNING, ERROR
+LOG_FILE=bot.log    # also write to a file (stdout is always used)
 ```
+
+Under systemd or Docker, leave `LOG_FILE` unset and let journald/`docker logs`
+handle rotation.
+
+### Uploading files larger than 50MB
+`api.telegram.org` rejects bot uploads above 50MB. To lift that, run a
+[local Bot API server](https://github.com/tdlib/telegram-bot-api) alongside the
+bot and set:
+
+```env
+TELEGRAM_API_BASE_URL=http://localhost:8081
+MAX_UPLOAD_SIZE_MB=2000
+PRIVATE_CHAT_IDS=123456789
+```
+
+Without it, the bot detects the situation before uploading and tells the user
+rather than failing with an opaque "Request Entity Too Large".
+
+### Disk usage
+Downloads are staged in `DOWNLOAD_DIR` and deleted after each send, success or
+failure. On startup, files older than `CLEANUP_MAX_AGE_HOURS` (default 6) are
+swept, which covers anything left behind by a crash or a hard restart.
 
 ### Health Checks
 Add health check endpoint:

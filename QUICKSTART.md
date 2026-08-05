@@ -11,6 +11,13 @@ Open terminal/command prompt in the bot folder and run:
 pip install -r requirements.txt
 ```
 
+Install `ffmpeg` too — without it the bot can only grab single-stream (lower
+quality) videos and cannot generate thumbnails:
+```bash
+brew install ffmpeg          # macOS
+sudo apt install ffmpeg      # Debian/Ubuntu
+```
+
 ### Step 3: Create Your Bot
 1. Open Telegram
 2. Search for `@BotFather`
@@ -46,7 +53,12 @@ pip install -r requirements.txt && cp .env.example .env && echo "Edit .env with 
 ## 🆘 Need Help?
 
 - **Bot not responding?** Check your token in `.env`
-- **Download fails?** Try a different video URL
+- **Nothing happens in a group?** Turn off Group Privacy in @BotFather, and add
+  `#download` to the message (or use `/dl <url>`)
+- **Download fails?** Try a different video URL; `/status` shows whether ffmpeg is
+  available
+- **"Too large to upload"?** Telegram caps bot uploads at 50MB — see the local Bot
+  API server section in README.md
 - **Still stuck?** Check the full README.md
 
 ---

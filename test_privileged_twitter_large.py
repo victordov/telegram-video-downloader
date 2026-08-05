@@ -1,93 +1,110 @@
 """
-Regression test for privileged Twitter large-video downloads.
-Ensures the bot reuses VideoDownloader's single-entry logic instead of a raw yt-dlp playlist download.
+Regression test for privileged large-video downloads.
+
+Two things are pinned down here:
+
+1. The bot goes through ``VideoDownloader.download_video`` rather than driving
+   yt-dlp itself (an inline copy used to break on Twitter playlist results).
+2. A privileged chat asks for the size limit to be bypassed up front, in a
+   single extraction pass, instead of downloading twice.
 """
 
-import asyncio
 import os
-import tempfile
-from typing import cast
+
+import pytest
 from unittest.mock import AsyncMock, Mock
 
+import config
 import telegram_bot
-from telegram import Message
-from telegram_bot import TelegramVideoBot
 from test_bot import MockChat, MockMessage
 
-
-async def test_privileged_large_twitter_download_uses_shared_downloader():
-    original_private_chat_ids = telegram_bot.PRIVATE_CHAT_IDS[:]
-    test_dir = tempfile.mkdtemp()
-
-    try:
-        telegram_bot.PRIVATE_CHAT_IDS = ['100000001']
-
-        bot = TelegramVideoBot('dummy_token')
-        bot.downloader.download_dir = test_dir
-
-        message = MockMessage(
-            'https://x.com/user/status/1234567890123456789',
-            message_id=1,
-            chat=MockChat(chat_id=100000001, chat_type='private')
-        )
-
-        processing_msg = AsyncMock()
-        processing_msg.edit_text = AsyncMock()
-        processing_msg.delete = AsyncMock()
-        message.reply_text = AsyncMock(return_value=processing_msg)
-
-        downloaded_path = os.path.join(test_dir, 'clip-one.mp4')
-        with open(downloaded_path, 'wb') as output:
-            output.write(b'fake video bytes')
-
-        download_calls = []
-
-        def fake_download(url, ignore_size_limit=False):
-            download_calls.append((url, ignore_size_limit))
-            if not ignore_size_limit:
-                return {
-                    'error': 'file_too_large',
-                    'message': 'Video file is too large to download (limit: 50MB)',
-                    'filesize': 52 * 1024 * 1024,
-                    'title': 'clip one',
-                    'platform': 'twitter',
-                    'duration': 42,
-                }
-            return {
-                'filepath': downloaded_path,
-                'title': 'clip one',
-                'platform': 'twitter',
-                'duration': 42,
-                'filesize': os.path.getsize(downloaded_path),
-                'width': 720,
-                'height': 1280,
-            }
-
-        bot.downloader.check_for_video = Mock(return_value=True)
-        bot.downloader.download_video = Mock(side_effect=fake_download)
-        bot.downloader.cleanup_file = Mock(side_effect=lambda filepath: os.remove(filepath) if os.path.exists(filepath) else None)
-        bot._send_video_with_retry = AsyncMock(return_value=True)
-
-        await bot.process_video_url(cast(Message, message), 'https://x.com/user/status/1234567890123456789')
-
-        assert download_calls == [
-            ('https://x.com/user/status/1234567890123456789', False),
-            ('https://x.com/user/status/1234567890123456789', True),
-        ]
-        bot._send_video_with_retry.assert_awaited_once()
-        assert not os.path.exists(downloaded_path)
-    finally:
-        telegram_bot.PRIVATE_CHAT_IDS = original_private_chat_ids
-        if os.path.exists(test_dir):
-            try:
-                os.rmdir(test_dir)
-            except OSError:
-                pass
+# Arbitrary placeholder. Real chat IDs belong in PRIVATE_CHAT_IDS in .env, never
+# in the repository - the tests monkeypatch the list, so the value is irrelevant.
+PRIVILEGED_CHAT_ID = 100000001
+TWEET_URL = 'https://x.com/user/status/1234567890123456789'
 
 
-if __name__ == '__main__':
-    asyncio.run(test_privileged_large_twitter_download_uses_shared_downloader())
-    print('Privileged Twitter large-video regression test passed')
+@pytest.fixture
+def privileged(monkeypatch):
+    monkeypatch.setattr(telegram_bot, 'PRIVATE_CHAT_IDS', [str(PRIVILEGED_CHAT_ID)])
 
 
+async def test_privileged_large_download_uses_the_shared_downloader(bot, privileged,
+                                                                    download_dir, monkeypatch):
+    monkeypatch.setattr(config, 'MAX_UPLOAD_SIZE_MB', 2000)
 
+    downloaded_path = os.path.join(download_dir, 'clip-one.mp4')
+    with open(downloaded_path, 'wb') as output:
+        output.write(b'fake video bytes')
+
+    calls = []
+
+    def fake_download(url, ignore_size_limit=False, progress_callback=None):
+        calls.append((url, ignore_size_limit))
+        return {
+            'filepath': downloaded_path,
+            'title': 'clip one',
+            'platform': 'twitter',
+            'duration': 42,
+            'filesize': 120 * 1024 * 1024,
+            'width': 720,
+            'height': 1280,
+        }
+
+    bot.downloader.download_video = Mock(side_effect=fake_download)
+    bot._send_video_with_retry = AsyncMock(return_value=True)
+
+    message = MockMessage(TWEET_URL, chat=MockChat(chat_id=PRIVILEGED_CHAT_ID,
+                                                   chat_type='private'))
+    await bot.process_video_url(message, TWEET_URL)
+
+    # One extraction pass, with the limit waived up front.
+    assert calls == [(TWEET_URL, True)]
+    bot._send_video_with_retry.assert_awaited_once()
+    message.status_message.delete.assert_awaited_once()
+    assert not os.path.exists(downloaded_path)
+
+
+async def test_privileged_group_chat_is_not_privileged(bot, privileged, download_dir):
+    """The bypass is deliberately limited to private chats."""
+    calls = []
+
+    def fake_download(url, ignore_size_limit=False, progress_callback=None):
+        calls.append((url, ignore_size_limit))
+        return {'error': 'file_too_large', 'message': 'too big', 'filesize': 120 * 1024 * 1024}
+
+    bot.downloader.download_video = Mock(side_effect=fake_download)
+
+    message = MockMessage(TWEET_URL, chat=MockChat(chat_id=PRIVILEGED_CHAT_ID,
+                                                   chat_type='supergroup'))
+    await bot.process_video_url(message, TWEET_URL)
+
+    assert calls == [(TWEET_URL, False)]
+    assert any('too big' in (text or '') for text in message.status_message.texts)
+
+
+async def test_privileged_download_still_respects_the_upload_ceiling(bot, privileged,
+                                                                     download_dir, monkeypatch):
+    """Bypassing the download limit does not make a 120MB upload possible on the public API."""
+    monkeypatch.setattr(config, 'MAX_UPLOAD_SIZE_MB', 50)
+    monkeypatch.setattr(config, 'USE_LOCAL_BOT_API', False)
+
+    downloaded_path = os.path.join(download_dir, 'huge.mp4')
+    with open(downloaded_path, 'wb') as output:
+        output.write(b'x')
+
+    bot.downloader.download_video = Mock(return_value={
+        'filepath': downloaded_path, 'title': 'huge', 'platform': 'twitter',
+        'duration': 42, 'filesize': 120 * 1024 * 1024,
+    })
+    bot._send_video_with_retry = AsyncMock(return_value=True)
+
+    message = MockMessage(TWEET_URL, chat=MockChat(chat_id=PRIVILEGED_CHAT_ID,
+                                                   chat_type='private'))
+    await bot.process_video_url(message, TWEET_URL)
+
+    bot._send_video_with_retry.assert_not_awaited()
+    assert not os.path.exists(downloaded_path)
+    texts = " ".join(text or '' for text in message.status_message.texts)
+    assert 'upload limit' in texts
+    assert 'TELEGRAM_API_BASE_URL' in texts

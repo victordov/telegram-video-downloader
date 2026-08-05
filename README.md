@@ -1,34 +1,41 @@
 # Telegram Video Downloader Bot
 
-A powerful Telegram bot that automatically detects video links from popular social media platforms (YouTube, Instagram, Facebook, TikTok, Twitter/X.com, and 9GAG) in chat messages, downloads the videos, and shares them back to the chat.
+A Telegram bot that detects video links from popular social platforms in chat messages, downloads them, and shares them back to the chat.
 
 ## Features
 
-- **Multi-Platform Support**: Downloads videos from YouTube, Instagram, Facebook, TikTok, Twitter/X.com, Threads, and 9GAG
-- **Automatic Detection**: Automatically detects video URLs in messages
-- **Works Everywhere**: Functions in both private chats and group chats
-- **Smart Processing**: Only processes new messages after the bot is added to prevent spam
-- **File Size Management**: Respects Telegram's 50MB file size limit
-- **Error Handling**: Robust error handling with user-friendly messages
-- **Easy Setup**: Simple configuration with environment variables
+- **Multi-Platform Support**: YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, 9GAG and VK
+- **Automatic Detection**: Finds video URLs in message text, captions and hyperlinked text
+- **Live Progress**: The status message shows a progress bar, speed and ETA while downloading
+- **Concurrent**: Several downloads run in parallel without blocking other chats
+- **Works Everywhere**: Private chats and group chats, with per-chat download rules
+- **Smart Sending**: Playable video under 50MB, file attachment above it, with a poster frame
+- **Threads Screenshots**: Non-video Threads posts come back as a screenshot
+- **Robust**: Retries, timeouts, size guards and specific error messages for private, geo-blocked, rate-limited or removed content
+- **Configurable**: Every limit and timeout is an environment variable
 
 ## Supported Platforms
 
 | Platform | URL Formats Supported |
 |----------|----------------------|
-| **YouTube** | `youtube.com/watch?v=`, `youtu.be/`, `youtube.com/shorts/` |
-| **Instagram** | `instagram.com/p/`, `instagram.com/reel/`, `instagram.com/tv/` |
-| **TikTok** | `tiktok.com/@user/video/`, `vm.tiktok.com/`, `tiktok.com/t/` |
-| **Facebook** | `facebook.com/watch/`, `facebook.com/videos/`, `fb.watch/` |
+| **YouTube** | `youtube.com/watch?v=`, `youtu.be/`, `youtube.com/shorts/`, `youtube.com/live/`, `m.`/`music.` |
+| **Instagram** | `instagram.com/p/`, `/reel/`, `/reels/`, `/tv/`, `/stories/`, `/share/` |
+| **TikTok** | `tiktok.com/@user/video/`, `vm.tiktok.com/`, `vt.tiktok.com/`, `tiktok.com/t/` |
+| **Facebook** | `facebook.com/watch/`, `/videos/`, `/reel/`, `fb.watch/` |
 | **Twitter/X.com** | `twitter.com/username/status/`, `x.com/username/status/`, `t.co/` |
 | **Threads** | `threads.com/@.../post/`, `threads.net/@.../post/` |
 | **9GAG** | `9gag.com/gag/<post_id>` |
+| **VK** | `vk.com/video…`, `vk.com/clip…`, `vkvideo.ru/video…` |
 
 ## Requirements
 
 - Python 3.9 or higher
 - Internet connection
 - Telegram Bot Token (from @BotFather)
+- **ffmpeg** (recommended) — enables merging separate video/audio streams for much
+  better quality per megabyte, plus video thumbnails. Without it the bot falls back
+  to single-stream downloads.
+- Chrome + chromedriver (optional) — only needed for Threads screenshots
 
 ## Installation
 
@@ -123,48 +130,110 @@ Starting Telegram Video Bot...
 ### Bot Commands
 
 - `/start` - Show welcome message and bot information
-- `/help` - Display help and usage instructions  
-- `/status` - Check bot status and statistics
+- `/help` - Display help and usage instructions
+- `/status` - Bot status, uptime, download counters and configuration
+- `/dl <url>` - Force a download of a specific link (also works as a reply to a
+  message containing a link, which is handy in groups)
+
+### Download Rules
+
+| Where | Behaviour |
+|-------|-----------|
+| Private chat | Every supported link is downloaded automatically |
+| Group chat | Platforms in `GROUP_AUTO_PLATFORMS` (TikTok by default) download automatically |
+| Group chat | Everything else needs the `#download` tag in the message, or `/dl` |
 
 ### How It Works
 
 1. **Send a message** containing a video URL from any supported platform
 2. **The bot detects** the video link automatically
-3. **Downloads the video** using yt-dlp
-4. **Shares the video** back to the chat with metadata
+3. **Downloads the video** using yt-dlp, editing a status message with live progress
+4. **Shares the video** back to the chat with metadata, then deletes the status message
+   and removes the temporary file
 
 ### Example Usage
 
 ```
 User: "Check out this amazing video! https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
-Bot: "🔄 Downloading video from YouTube..."
+Bot: 🔎 Found a Youtube link…
+Bot: ⬇️ Downloading from Youtube
+     ███████░░░░░ 62%
+     12.0 MB / 20.0 MB · 3.1 MB/s · ETA 0:12
+Bot: 📤 Uploading 20.0 MB…
 
-Bot: [Sends video file with caption]
+Bot: [Sends video with caption]
 🎥 Never Gonna Give You Up
 
-📱 Platform: Youtube
-⏱️ Duration: 212s
-📊 Size: 8.5MB
+📱 Youtube · ⏱️ 3:32 · 📊 8.5MB
+source
 ```
 
 ## Configuration Options
 
-### Environment Variables
+All settings live in `config.py` and are read from the environment (or `.env`).
+See `.env.example` for the annotated full list.
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from BotFather | Yes | None |
-| `DOWNLOAD_DIR` | Directory to store temporary downloads | No | System temp directory |
-| `PRIVATE_CHAT_IDS` | Comma-separated list of private chat IDs that can download videos of any size (bypassing the 50MB limit) | No | Empty list |
+### Core
 
-### Advanced Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TELEGRAM_BOT_TOKEN` | Bot token from BotFather (**required**) | — |
+| `DOWNLOAD_DIR` | Where downloads are staged | `<temp>/telegram-video-bot` |
+| `PRIVATE_CHAT_IDS` | Private chat IDs allowed to exceed `MAX_DOWNLOAD_SIZE_MB` | empty |
+| `LOG_LEVEL` / `LOG_FILE` | Logging verbosity and optional log file | `INFO` / none |
 
-You can modify the video downloader settings in `video_downloader.py`:
+### Sizes and uploads
 
-- **File size limits**: Change the `50M` limit in format strings
-- **Video quality**: Modify format selection preferences
-- **Platform-specific options**: Add custom yt-dlp options per platform
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TELEGRAM_API_BASE_URL` | Self-hosted Bot API server; the only way to upload above 50MB | none |
+| `MAX_UPLOAD_SIZE_MB` | Hard upload ceiling | `50` (`2000` with a local API server) |
+| `MAX_DOWNLOAD_SIZE_MB` | Reject videos estimated above this before downloading | `MAX_UPLOAD_SIZE_MB` |
+| `MAX_VIDEO_HEIGHT` | Upper bound on requested video height | `1080` |
+
+### Behaviour
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DOWNLOAD_TAG` | Tag that opts a group message in | `#download` |
+| `GROUP_AUTO_PLATFORMS` | Platforms downloaded in groups without the tag | `tiktok` |
+| `HINT_ON_UNTAGGED_LINKS` | Reply with a hint when a group link is skipped | `false` |
+| `REPLY_ON_UNSUPPORTED_LINKS` | Explain unsupported links in private chats | `true` |
+| `GENERATE_THUMBNAILS` | Attach a poster frame (needs ffmpeg) | `true` |
+
+### Performance
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MAX_CONCURRENT_DOWNLOADS` | Downloads running at once across all chats | `3` |
+| `CONCURRENT_FRAGMENTS` | Parallel fragment downloads for HLS/DASH | `4` |
+| `DOWNLOAD_TIMEOUT_SECONDS` | Abandon a download after this long | `900` |
+| `UPLOAD_TIMEOUT_SECONDS` | Abandon an upload attempt after this long | `300` |
+| `MAX_UPLOAD_RETRIES` | Upload attempts before giving up | `3` |
+| `PROGRESS_UPDATE_INTERVAL` | Minimum seconds between progress edits | `4` |
+
+### Authentication
+
+| Variable | Description |
+|----------|-------------|
+| `COOKIE_FILE` | Netscape cookie file handed to yt-dlp |
+| `COOKIES_FROM_BROWSER` | Read cookies from a browser profile, e.g. `chrome` |
+| `FFMPEG_LOCATION` | Explicit ffmpeg directory when it is not on `PATH` |
+
+### Uploading files larger than 50MB
+
+`api.telegram.org` refuses bot uploads above 50MB regardless of what the bot does.
+To send bigger files, run a [local Bot API server](https://github.com/tdlib/telegram-bot-api)
+and point the bot at it:
+
+```env
+TELEGRAM_API_BASE_URL=http://localhost:8081
+PRIVATE_CHAT_IDS=123456789
+```
+
+`MAX_UPLOAD_SIZE_MB` then defaults to 2000 and the chats listed in
+`PRIVATE_CHAT_IDS` may download videos above the normal limit.
 
 ## Troubleshooting
 
@@ -204,28 +273,41 @@ You can modify the video downloader settings in `video_downloader.py`:
 
 ```
 telegram_video_bot/
-├── telegram_bot.py          # Main bot implementation
-├── video_downloader.py      # Video downloading logic
-├── run_bot.py              # Bot runner with setup checks
-├── requirements.txt        # Python dependencies
-├── .env.example           # Environment variables template
-├── test_bot.py            # Bot functionality tests
-├── test_integration.py    # Integration tests
-└── README.md              # This file
+├── config.py                       # All environment-driven settings
+├── telegram_bot.py                 # Bot handlers, progress UI and sending
+├── video_downloader.py             # yt-dlp wrapper, fallbacks and screenshots
+├── run_bot.py                      # Runner with a pre-flight check
+├── requirements.txt                # Runtime dependencies
+├── requirements-dev.txt            # Runtime + test dependencies
+├── pytest.ini / conftest.py        # Test configuration and fixtures
+├── test_bot.py                     # Handlers, captions, sending, dedup
+├── test_downloader.py              # Downloader units (yt-dlp stubbed)
+├── test_integration.py             # Message in -> video out
+├── test_video_detection.py         # Threads probe and screenshot plumbing
+├── test_9gag_fallback.py           # Direct MP4 fallback
+├── test_twitter_playlist.py        # Playlist/format-selection regressions
+├── test_privileged_twitter_large.py# Privileged large-download regressions
+├── test_simple.py                  # Live smoke tests (opt in)
+└── README.md                       # This file
 ```
 
 ### Running Tests
 
 ```bash
-# Test URL detection and bot logic
-python test_bot.py
+pip install -r requirements-dev.txt
 
-# Test integration between components
-python test_integration.py
+# The whole offline suite (no network, no browser)
+pytest
 
-# Test video downloader (requires internet)
-python test_downloader.py
+# A single file, verbose
+pytest test_bot.py -v
+
+# Live smoke tests against the real platforms
+RUN_NETWORK_TESTS=1 pytest -m network
 ```
+
+The offline suite stubs out yt-dlp and the Telegram transport, so it runs in
+well under a second and is safe to run in CI.
 
 ### Adding New Platforms
 
@@ -275,12 +357,16 @@ pm2 start run_bot.py --interpreter python3
 
 ## Limitations
 
-- **File Size**: Maximum 50MB per video (Telegram limitation)
-  - *Note: Specific private chats can bypass this limit using the `PRIVATE_CHAT_IDS` environment variable*
+- **File Size**: `api.telegram.org` caps bot uploads at 50MB. Run a local Bot API
+  server (`TELEGRAM_API_BASE_URL`) to raise this to 2GB; see the configuration
+  section above.
+- **Playable video vs file**: Telegram only renders files up to 50MB as playable
+  video. Anything larger is sent as a document.
 - **Platform Changes**: Video platforms may change APIs, requiring yt-dlp updates
 - **Rate Limiting**: Some platforms may rate-limit requests
 - **Geographic Restrictions**: Some videos may not be available in all regions
-- **Private Content**: Cannot download private or restricted videos
+- **Private Content**: Cannot download private or restricted videos without cookies
+  (`COOKIE_FILE` / `COOKIES_FROM_BROWSER`)
 
 ## License
 
@@ -296,6 +382,27 @@ Contributions are welcome! Please:
 4. Add tests for new features
 
 ## Changelog
+
+### Version 2.0.0
+- Downloads and screenshots run off the event loop, so one download no longer
+  blocks every other chat; concurrency is bounded by `MAX_CONCURRENT_DOWNLOADS`
+- Live download progress (bar, speed, ETA) in the status message
+- Captions switched to HTML with escaping and truncation, fixing crashes on
+  titles containing Markdown characters or exceeding Telegram's 1024 limit
+- Message de-duplication keyed on `(chat_id, message_id)` with a bounded cache;
+  previously a message ID in one chat could silently suppress another chat's
+- Screenshots are now cleaned up and their status message removed
+- Post-download size check, upload-ceiling check and specific error messages for
+  private, removed, geo-blocked, rate-limited and live content
+- ffmpeg-aware format selection (merged video+audio), generated thumbnails,
+  collision-free filenames and startup cleanup of stale files
+- Threads video detection replaced a headless-browser launch with an HTTP probe
+- New `config.py` for all settings, `/dl` command, richer `/status`,
+  local Bot API server support, cookie support
+- Test suite converted to asserting pytest tests (150+ offline tests)
+
+### Version 1.3.0
+- Added support for VK videos and clips
 
 ### Version 1.1.0
 - Added support for Twitter/X.com videos

@@ -1,0 +1,16 @@
+services:
+  telegram-video-bot:
+    build: .
+    env_file:
+      - .env
+    environment:
+      # Staged downloads live on the mounted volume, not the container layer.
+      DOWNLOAD_DIR: /app/downloads
+    volumes:
+      - ./downloads:/app/downloads
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

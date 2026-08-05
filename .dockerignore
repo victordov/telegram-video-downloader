@@ -1,0 +1,13 @@
+.git
+.gitignore
+.idea
+.jbeval
+__pycache__
+*.pyc
+.env
+downloads/
+test_*.py
+conftest.py
+pytest.ini
+requirements-dev.txt
+*.md
