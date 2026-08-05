@@ -3,7 +3,7 @@ Telegram Video Downloader Bot
 ================================
 
 A robust Telegram bot that downloads videos from multiple social media platforms:
-- YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, 9GAG
+- YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, 9GAG, VK
 
 Features:
 - Automatic platform detection
@@ -100,6 +100,7 @@ I can download videos from:
 • Twitter/X
 • Threads (screenshots for non-video posts)
 • 9GAG
+• VK (vk.com)
 
 In private chats: All videos are downloaded automatically!
 In group chats: 
@@ -131,12 +132,13 @@ I work in both private chats and group chats!
    • Twitter/X (twitter.com, x.com, t.co)
    • Threads (threads.com, threads.net)
    • 9GAG (9gag.com/gag/...)
+   • VK (vk.com, m.vk.com)
 
 2. Video download behavior:
    • In private chats: All videos are downloaded automatically
    • In group chats:
      - TikTok videos are downloaded automatically
-     - For other platforms (YouTube, Instagram, Facebook, Twitter/X, Threads, 9GAG), add #download tag to your message
+     - For other platforms (YouTube, Instagram, Facebook, Twitter/X, Threads, 9GAG, VK), add #download tag to your message
 
 3. The video will be shared back to the chat
    • For Threads posts that are not videos, a screenshot will be taken and shared as a photo
@@ -170,7 +172,7 @@ I work in both private chats and group chats!
 
 ✅ Bot is running
 📁 Downloads processed: {len(self.processed_messages)}
-🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, 9GAG
+🔧 Supported platforms: YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, 9GAG, VK
         """
         logger.info(f"Sending status message to user {user.id} in chat {chat_id} (downloads processed: {len(self.processed_messages)})")
         await update.message.reply_text(status_message, parse_mode=ParseMode.MARKDOWN)
@@ -326,83 +328,20 @@ I work in both private chats and group chats!
                             parse_mode=ParseMode.MARKDOWN
                         )
                         
-                        # Create custom ydl_opts to bypass size check
-                        from video_downloader import yt_dlp
-                        import tempfile
-                        import os
-                        
-                        # Get temporary directory for download
-                        temp_dir = self.downloader.download_dir or tempfile.gettempdir()
-                        
-                        # Create ydl_opts similar to those in VideoDownloader
-                        ydl_opts = {
-                            'format': 'best[ext=mp4]/best',
-                            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-                            'quiet': True,
-                            'no_warnings': True,
-                            'progress_hooks': [self.downloader.progress_hook]
-                        }
-                        
                         try:
-                            # Download the video without size check
-                            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                                info = ydl.extract_info(url, download=True)
-                                filename = ydl.prepare_filename(info)
-                                
-                                # Handle cases where the actual filename might be different
-                                if not os.path.exists(filename):
-                                    base_name = os.path.splitext(filename)[0]
-                                    for ext in ['.mp4', '.webm', '.mkv', '.avi', '.mov']:
-                                        test_path = base_name + ext
-                                        if os.path.exists(test_path):
-                                            filename = test_path
-                                            break
-                                
-                                if os.path.exists(filename):
-                                    actual_filesize = os.path.getsize(filename)
-                                    title = info.get('title', 'Unknown')
-                                    duration = info.get('duration', 'Unknown')
-                                    
-                                    # Create a result dictionary similar to what download_video returns
-                                    # Extract dimensions if available to help Telegram keep correct aspect ratio
-                                    width = info.get('width') or None
-                                    height = info.get('height') or None
-                                    try:
-                                        if (width is None or height is None) and isinstance(info.get('requested_formats'), list):
-                                            for f in info['requested_formats']:
-                                                if not width and f.get('width'):
-                                                    width = f.get('width')
-                                                if not height and f.get('height'):
-                                                    height = f.get('height')
-                                        if (width is None or height is None) and isinstance(info.get('formats'), list):
-                                            selected_id = info.get('format_id')
-                                            for f in info['formats']:
-                                                if selected_id and f.get('format_id') == selected_id:
-                                                    width = width or f.get('width')
-                                                    height = height or f.get('height')
-                                                    break
-                                    except Exception:
-                                        pass
+                            result = self.downloader.download_video(url, ignore_size_limit=True)
+                            if not result or (isinstance(result, dict) and 'error' in result):
+                                error_text = result.get('message') if isinstance(result, dict) else None
+                                await processing_msg.edit_text(
+                                    "❌ Failed to download large video despite special permission."
+                                    + (f"\n\n{error_text}" if error_text else "")
+                                )
+                                return
 
-                                    result = {
-                                        'filepath': filename,
-                                        'title': title,
-                                        'platform': platform,
-                                        'duration': duration,
-                                        'filesize': actual_filesize,
-                                        'width': width,
-                                        'height': height
-                                    }
-                                    logger.info(f"Special download complete - File: {filename}, Size: {actual_filesize / (1024*1024):.1f}MB")
-                                    
-                                    # Skip the return statement and continue processing to send the video
-                                    # The code will now proceed to the section that sends the video to the chat
-                                else:
-                                    # If download failed, show error message
-                                    await processing_msg.edit_text(
-                                        f"❌ Failed to download large video despite special permission."
-                                    )
-                                    return
+                            logger.info(
+                                f"Special download complete - File: {result['filepath']}, "
+                                f"Size: {result['filesize'] / (1024*1024):.1f}MB"
+                            )
                         except Exception as e:
                             logger.error(f"Error in special download: {str(e)}")
                             await processing_msg.edit_text(

@@ -1,6 +1,6 @@
 """
 Video downloader module using yt-dlp for multiple platforms
-Supports YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, and 9GAG
+Supports YouTube, Instagram, Facebook, TikTok, Twitter/X, Threads, 9GAG, and VK
 Also supports taking screenshots of Threads posts when they're not videos
 """
 
@@ -9,6 +9,8 @@ import re
 import tempfile
 import logging
 import time
+import subprocess
+import shutil
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 import requests
@@ -58,10 +60,17 @@ class VideoDownloader:
         ],
         '9gag': [
             r'(?:https?://)?(?:www\.)?9gag\.com/gag/([a-zA-Z0-9]+)'
+        ],
+        'vk': [
+            r'(?:https?://)?(?:www\.|m\.)?vk\.com/video-?\d+_\d+',
+            r'(?:https?://)?(?:www\.|m\.)?vk\.com/videos-?\d+\?.*z=video',
+            r'(?:https?://)?(?:www\.|m\.)?vk\.com/clip-?\d+_\d+',
+            r'(?:https?://)?(?:www\.|m\.)?vk\.com/[^/]+\?.*z=video',
+            r'(?:https?://)?(?:www\.|m\.)?vkvideo\.ru/video-?\d+_\d+'
         ]
     }
 
-    def __init__(self, download_dir: str = None):
+    def __init__(self, download_dir: Optional[str] = None):
         """Initialize the video downloader
 
         Args:
@@ -134,12 +143,13 @@ class VideoDownloader:
             return False
 
         # For platforms that always contain videos
-        if platform in ['youtube', 'tiktok', 'facebook', 'twitter', '9gag']:
+        if platform in ['youtube', 'tiktok', 'facebook', 'twitter', '9gag', 'vk']:
             self.logger.info(f"✅ Platform {platform} typically contains videos: {url}")
             return True
 
         # For Threads, we need to check if it contains a video
         if platform == 'threads':
+            driver = None
             try:
                 # Setup Chrome options
                 chrome_options = Options()
@@ -239,7 +249,7 @@ class VideoDownloader:
                 # If we can't check, assume it doesn't contain a video
                 return False
             finally:
-                if 'driver' in locals() and driver:
+                if driver:
                     driver.quit()
 
         # For Instagram, assume it contains a video (we'll try to download it anyway)
@@ -306,6 +316,9 @@ class VideoDownloader:
             },
             '9gag': {
                 'format': 'best[ext=mp4][filesize<50M]/best[filesize<50M]/best',
+            },
+            'vk': {
+                'format': 'best[height<=720][filesize<50M]/best[filesize<50M]/best',
             }
         }
 
@@ -346,11 +359,151 @@ class VideoDownloader:
         elif d['status'] == 'error':
             self.logger.error(f"Download error: {d.get('error', 'unknown error')}")
 
-    def download_video(self, url: str) -> Optional[Dict[str, Any]]:
+    def _select_download_info(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize extractor results to a concrete downloadable entry."""
+        download_info = dict(info)
+        if info.get('_type') == 'playlist':
+            entries = [entry for entry in (info.get('entries') or []) if isinstance(entry, dict)]
+            if not entries:
+                raise Exception('No downloadable entries found in playlist result')
+            self.logger.info(
+                f"Extractor returned playlist result with {len(entries)} entries; downloading first entry"
+            )
+            download_info = dict(entries[0])
+        return download_info
+
+    def _estimate_filesize(self, platform: str, download_info: Dict[str, Any]) -> int:
+        """Estimate download size, with Twitter-specific corrections for playlist/HLS metadata."""
+        filesize = download_info.get('filesize') or download_info.get('filesize_approx') or 0
+        if filesize is None:
+            filesize = 0
+
+        if platform != 'twitter':
+            return int(filesize)
+
+        candidate_sizes = []
+        requested_formats_raw = download_info.get('requested_formats')
+        requested_formats = [fmt for fmt in requested_formats_raw if isinstance(fmt, dict)] if isinstance(requested_formats_raw, list) else []
+        if requested_formats:
+            combined_requested_size = 0
+            has_requested_size = False
+            combined_tbr = 0
+            for fmt in requested_formats:
+                size = fmt.get('filesize') or fmt.get('filesize_approx')
+                if size:
+                    combined_requested_size += size
+                    has_requested_size = True
+                if fmt.get('tbr'):
+                    combined_tbr += fmt.get('tbr')
+            if has_requested_size:
+                candidate_sizes.append(combined_requested_size)
+
+            duration = download_info.get('duration') or 0
+            if combined_tbr and duration:
+                candidate_sizes.append(duration * combined_tbr * 1000 / 8)
+
+        selected_format_id = download_info.get('format_id')
+        formats = download_info.get('formats') or []
+        for fmt in formats:
+            if selected_format_id and fmt.get('format_id') == selected_format_id:
+                size = fmt.get('filesize') or fmt.get('filesize_approx')
+                if size:
+                    candidate_sizes.append(size)
+                if fmt.get('tbr') and download_info.get('duration'):
+                    candidate_sizes.append(download_info['duration'] * fmt['tbr'] * 1000 / 8)
+                break
+
+        duration = download_info.get('duration') or 0
+        tbr = download_info.get('tbr') or 0
+        if duration and tbr:
+            candidate_sizes.append(duration * tbr * 1000 / 8)
+
+        positive_candidates = [int(size) for size in candidate_sizes if size and size > 0]
+        if positive_candidates:
+            better_estimate = min(positive_candidates)
+            if filesize <= 0 or better_estimate < filesize:
+                self.logger.info(
+                    f"Using corrected Twitter size estimate: {better_estimate / (1024*1024):.1f}MB "
+                    f"instead of {filesize / (1024*1024):.1f}MB"
+                )
+                filesize = better_estimate
+
+        if filesize > 100 * 1024 * 1024 and duration:
+            estimated_bitrate = 2 * 1024 * 1024  # 2 Mbps in bits per second
+            bitrate_estimate = duration * estimated_bitrate / 8
+            if bitrate_estimate < filesize:
+                self.logger.info(
+                    f"Calculated fallback Twitter size estimate from duration: {bitrate_estimate / (1024*1024):.1f}MB"
+                )
+                filesize = bitrate_estimate
+
+        return int(filesize)
+
+    def _optimize_twitter_format(self, download_info: Dict[str, Any], size_limit_bytes: int) -> Dict[str, Any]:
+        """Pick the best Twitter MP4 variant that fits within the size limit, when available."""
+        formats = download_info.get('formats') or []
+        candidates = []
+        for fmt in formats:
+            if not isinstance(fmt, dict):
+                continue
+            if fmt.get('vcodec') == 'none':
+                continue
+            if fmt.get('protocol') != 'https':
+                continue
+            if fmt.get('ext') != 'mp4':
+                continue
+
+            candidate_size = fmt.get('filesize') or fmt.get('filesize_approx')
+            if not candidate_size or candidate_size > size_limit_bytes:
+                continue
+
+            candidates.append(fmt)
+
+        if not candidates:
+            return download_info
+
+        current_size = download_info.get('filesize') or download_info.get('filesize_approx') or 0
+        current_format_id = download_info.get('format_id')
+        best_candidate = max(
+            candidates,
+            key=lambda fmt: (
+                fmt.get('height') or 0,
+                fmt.get('tbr') or 0,
+                fmt.get('filesize') or fmt.get('filesize_approx') or 0,
+            )
+        )
+
+        if current_format_id == best_candidate.get('format_id'):
+            return download_info
+
+        best_size = best_candidate.get('filesize') or best_candidate.get('filesize_approx') or 0
+        if current_size and best_size >= current_size:
+            return download_info
+
+        self.logger.info(
+            f"Switching Twitter format from {current_format_id or 'unknown'} "
+            f"to {best_candidate.get('format_id')} to stay within size limit "
+            f"({best_size / (1024*1024):.1f}MB)"
+        )
+
+        optimized_info = dict(download_info)
+        for field in (
+            'format_id', 'format', 'filesize', 'filesize_approx', 'tbr', 'width', 'height',
+            'protocol', 'ext', 'vcodec', 'acodec', 'url', 'manifest_url', 'http_headers'
+        ):
+            if field in best_candidate:
+                optimized_info[field] = best_candidate.get(field)
+
+        optimized_info.pop('requested_formats', None)
+        optimized_info.pop('requested_downloads', None)
+        return optimized_info
+
+    def download_video(self, url: str, ignore_size_limit: bool = False) -> Optional[Dict[str, Any]]:
         """Download video from URL or take screenshot of Threads post
 
         Args:
             url: URL to process (video URL or Threads post URL)
+            ignore_size_limit: If True, download even when the pre-download estimate exceeds 50MB
 
         Returns:
             Dictionary with download info if successful, None otherwise
@@ -379,46 +532,23 @@ class VideoDownloader:
                 # Extract info first
                 info = ydl.extract_info(url, download=False)
 
+                download_info = self._select_download_info(info)
+                if platform == 'twitter':
+                    download_info = self._optimize_twitter_format(download_info, 50 * 1024 * 1024)
+
                 # Log video information
-                title = info.get('title', 'Unknown')
-                duration = info.get('duration', 'Unknown')
+                title = download_info.get('title', info.get('title', 'Unknown'))
+                duration = download_info.get('duration', info.get('duration', 'Unknown'))
                 self.logger.info(f"Video info - Title: {title}, Duration: {duration}s")
 
                 # Check file size before downloading
-                filesize = info.get('filesize') or info.get('filesize_approx', 0)
-                # Ensure filesize is not None to avoid TypeError
-                if filesize is None:
-                    filesize = 0
+                filesize = self._estimate_filesize(platform, download_info)
+                if filesize <= 0:
                     self.logger.warning("File size information not available")
-                
-                # For Twitter, the filesize estimate is often wrong. Try to get a better estimate
-                if platform == 'twitter' and filesize > 100 * 1024 * 1024:  # If estimate says > 100MB
-                    # Try to get filesize from the requested formats
-                    formats = info.get('formats', [])
-                    if formats:
-                        # Look for the best video format
-                        best_format = None
-                        for fmt in formats:
-                            if fmt.get('vcodec') != 'none' and fmt.get('acodec') != 'none':
-                                if best_format is None or fmt.get('filesize', 0) > best_format.get('filesize', 0):
-                                    best_format = fmt
-                        
-                        if best_format and best_format.get('filesize'):
-                            filesize = best_format['filesize']
-                            self.logger.info(f"Using better size estimate from format: {filesize / (1024*1024):.1f}MB")
-                
-                # If still too large, try calculating from bitrate and duration
-                if platform == 'twitter' and filesize > 100 * 1024 * 1024:
-                    duration = info.get('duration', 0)
-                    if duration:
-                        # Estimate based on typical Twitter video bitrate (around 2 Mbps for 1080p)
-                        estimated_bitrate = 2 * 1024 * 1024  # 2 Mbps in bytes per second
-                        filesize = duration * estimated_bitrate / 8  # Convert to bytes
-                        self.logger.info(f"Calculated size estimate from duration: {filesize / (1024*1024):.1f}MB")
 
                 self.logger.info(f"Estimated file size: {filesize / (1024*1024):.1f}MB")
 
-                if filesize > 50 * 1024 * 1024:  # 50MB limit
+                if filesize > 50 * 1024 * 1024 and not ignore_size_limit:  # 50MB limit
                     self.logger.error(f"File too large: {filesize / (1024*1024):.1f}MB (limit: 50MB)")
                     return {
                         'error': 'file_too_large',
@@ -428,14 +558,18 @@ class VideoDownloader:
                         'platform': platform,
                         'duration': duration
                     }
+                elif filesize > 50 * 1024 * 1024 and ignore_size_limit:
+                    self.logger.warning(
+                        f"Ignoring pre-download size limit for {platform}: {filesize / (1024*1024):.1f}MB"
+                    )
 
                 # Download the video by reusing already-fetched info to avoid
                 # re-requesting the webpage (which causes 403 on TikTok's JS challenge).
                 self.logger.info(f"Starting download of {title} from {platform}")
-                ydl.process_info(dict(info))
+                ydl.process_info(download_info)
 
                 # Get the downloaded file path
-                filename = ydl.prepare_filename(info)
+                filename = download_info.get('_filename') or ydl.prepare_filename(download_info)
                 self.logger.info(f"Expected filename: {filename}")
 
                 # Handle cases where the actual filename might be different
@@ -478,27 +612,27 @@ class VideoDownloader:
                 self.logger.info(f"Video details - Title: {title}, Platform: {platform}, Duration: {duration}s, Size: {actual_filesize / (1024*1024):.1f}MB")
 
                 # Try to determine video dimensions to preserve aspect ratio when sending via Telegram
-                width = info.get('width') or None
-                height = info.get('height') or None
+                width = download_info.get('width') or None
+                height = download_info.get('height') or None
                 # Fallback: inspect requested_formats or formats for dimensions
                 try:
-                    if (width is None or height is None) and isinstance(info.get('requested_formats'), list):
-                        for f in info['requested_formats']:
+                    if (width is None or height is None) and isinstance(download_info.get('requested_formats'), list):
+                        for f in download_info['requested_formats']:
                             if not width and f.get('width'):
                                 width = f.get('width')
                             if not height and f.get('height'):
                                 height = f.get('height')
-                    if (width is None or height is None) and isinstance(info.get('formats'), list):
+                    if (width is None or height is None) and isinstance(download_info.get('formats'), list):
                         # Prefer the selected format_id
-                        selected_id = info.get('format_id')
-                        for f in info['formats']:
+                        selected_id = download_info.get('format_id')
+                        for f in download_info['formats']:
                             if selected_id and f.get('format_id') == selected_id:
                                 width = width or f.get('width')
                                 height = height or f.get('height')
                                 break
                         # If still missing, take the best available non-audio format with dims
                         if width is None or height is None:
-                            for f in reversed(info['formats']):
+                            for f in reversed(download_info['formats']):
                                 if f.get('vcodec', 'none') != 'none' and f.get('width') and f.get('height'):
                                     width = width or f.get('width')
                                     height = height or f.get('height')
@@ -518,7 +652,9 @@ class VideoDownloader:
                 }
 
         except Exception as e:
-            error_message = str(e)
+            error_message = str(e).strip()
+            if not error_message:
+                error_message = f"{type(e).__name__}: {repr(e)}"
             self.logger.error(f"Error downloading {url}: {error_message}")
 
             # Log detailed error information
@@ -699,6 +835,23 @@ class VideoDownloader:
                         'duration': None
                     }
 
+        # 9GAG direct files can use codec/container combinations that fail on iPhone.
+        # Normalize to a more broadly compatible MP4 when tools are available.
+        filename = self._ensure_ios_compatible_video(filename, platform)
+        written = os.path.getsize(filename)
+
+        if written > 50 * 1024 * 1024:
+            self.cleanup_file(filename)
+            return {
+                'error': 'file_too_large',
+                'message': 'Video file is too large to download (limit: 50MB)',
+                'filesize': written,
+                'title': basename,
+                'platform': platform,
+                'duration': None
+            }
+
+        width, height = self._probe_video_dimensions(filename)
         return {
             'filepath': filename,
             'title': os.path.splitext(basename)[0],
@@ -706,9 +859,129 @@ class VideoDownloader:
             'duration': None,
             'filesize': written,
             'url': source_url,
-            'width': None,
-            'height': None
+            'width': width,
+            'height': height
         }
+
+    def _probe_video_dimensions(self, filepath: str):
+        """Return (width, height) of the video file using ffprobe, or (None, None) on failure."""
+        ffprobe_path = shutil.which('ffprobe')
+        if not ffprobe_path or not os.path.exists(filepath):
+            return None, None
+        try:
+            cmd = [
+                ffprobe_path,
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height',
+                '-of', 'default=noprint_wrappers=1:nokey=0',
+                filepath,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            width = height = None
+            for line in result.stdout.splitlines():
+                if line.startswith('width='):
+                    width = int(line.split('=', 1)[1].strip())
+                elif line.startswith('height='):
+                    height = int(line.split('=', 1)[1].strip())
+            return width, height
+        except Exception:
+            return None, None
+
+    def _ensure_ios_compatible_video(self, filepath: str, platform: str) -> str:
+        """Repackage/transcode fallback videos to improve iPhone playback compatibility."""
+        if platform != '9gag' or not os.path.exists(filepath):
+            return filepath
+
+        ffmpeg_path = shutil.which('ffmpeg')
+        ffprobe_path = shutil.which('ffprobe')
+        if not ffmpeg_path or not ffprobe_path:
+            self.logger.warning("ffmpeg/ffprobe not found, skipping iOS compatibility normalization")
+            return filepath
+
+        video_codec = None
+        audio_codec = None
+        pix_fmt = None
+        try:
+            probe_cmd = [
+                ffprobe_path,
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=codec_name,pix_fmt',
+                '-of', 'default=noprint_wrappers=1:nokey=0',
+                filepath,
+            ]
+            video_probe = subprocess.run(probe_cmd, capture_output=True, text=True, check=False)
+            for line in video_probe.stdout.splitlines():
+                if line.startswith('codec_name='):
+                    video_codec = line.split('=', 1)[1].strip().lower()
+                elif line.startswith('pix_fmt='):
+                    pix_fmt = line.split('=', 1)[1].strip().lower()
+
+            audio_cmd = [
+                ffprobe_path,
+                '-v', 'error',
+                '-select_streams', 'a:0',
+                '-show_entries', 'stream=codec_name',
+                '-of', 'default=noprint_wrappers=1:nokey=0',
+                filepath,
+            ]
+            audio_probe = subprocess.run(audio_cmd, capture_output=True, text=True, check=False)
+            for line in audio_probe.stdout.splitlines():
+                if line.startswith('codec_name='):
+                    audio_codec = line.split('=', 1)[1].strip().lower()
+                    break
+        except Exception as probe_error:
+            self.logger.warning(f"ffprobe failed, skipping compatibility check: {str(probe_error)}")
+            return filepath
+
+        needs_transcode = (
+            video_codec != 'h264' or
+            (audio_codec not in (None, 'aac', 'mp4a')) or
+            (pix_fmt not in (None, 'yuv420p'))
+        )
+
+        base, ext = os.path.splitext(filepath)
+        output_path = f"{base}_ios{ext or '.mp4'}"
+
+        if needs_transcode:
+            cmd = [
+                ffmpeg_path,
+                '-y',
+                '-i', filepath,
+                '-c:v', 'libx264',
+                '-profile:v', 'main',
+                '-level', '4.0',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                '-c:a', 'aac',
+                '-b:a', '128k',
+                '-ac', '2',
+                '-ar', '44100',
+                output_path,
+            ]
+            self.logger.info("Transcoding 9GAG video for iPhone compatibility")
+        else:
+            cmd = [
+                ffmpeg_path,
+                '-y',
+                '-i', filepath,
+                '-c', 'copy',
+                '-movflags', '+faststart',
+                output_path,
+            ]
+            self.logger.info("Remuxing 9GAG video with faststart for better compatibility")
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode != 0 or not os.path.exists(output_path):
+                self.logger.warning("Compatibility normalization failed, using original fallback file")
+                return filepath
+            self.cleanup_file(filepath)
+            return output_path
+        except Exception as ffmpeg_error:
+            self.logger.warning(f"Compatibility normalization error: {str(ffmpeg_error)}")
+            return filepath
 
     def take_screenshot(self, url: str) -> Optional[Dict[str, Any]]:
         """Take a screenshot of a web page
