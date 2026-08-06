@@ -31,6 +31,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx  # a hard dependency of python-telegram-bot
 from telegram import BotCommand, Message, MessageEntity, Update
 from telegram.constants import ParseMode
 from telegram.error import (
@@ -70,6 +71,28 @@ _TRAILING_PUNCTUATION = '.,;:!?\'")]}>'
 
 #: Errors that will never succeed on a retry.
 _FATAL_SEND_ERRORS = (BadRequest, Forbidden)
+
+#: Timeouts sent to Telegram alongside a file. Uploading a video is one long
+#: write followed by a wait while Telegram ingests it, so both halves need
+#: headroom. Crucially, python-telegram-bot applies `media_write_timeout`
+#: (default: 20 seconds!) instead of `write_timeout` to any request carrying a
+#: file, so passing write_timeout explicitly here is what actually takes effect.
+MEDIA_TIMEOUTS = {
+    'write_timeout': config.UPLOAD_TIMEOUT_SECONDS,
+    'read_timeout': config.UPLOAD_TIMEOUT_SECONDS,
+    'connect_timeout': 60,
+}
+
+
+def upload_retry_is_safe(error: BaseException) -> bool:
+    """Whether re-sending after this error could post the same media twice.
+
+    A connect/write/pool timeout means the body never fully reached Telegram, so
+    a retry is safe. A read timeout means we sent everything and gave up waiting
+    for the reply — Telegram may already have posted the message, and retrying
+    would duplicate it.
+    """
+    return not isinstance(error.__cause__, httpx.ReadTimeout)
 
 
 # ----------------------------------------------------------------------------
@@ -707,7 +730,7 @@ class TelegramVideoBot:
                 photo=result['filepath'],
                 caption=caption,
                 parse_mode=ParseMode.HTML,
-                write_timeout=config.UPLOAD_TIMEOUT_SECONDS,
+                **MEDIA_TIMEOUTS,
             )
         )
         if error is None:
@@ -733,8 +756,17 @@ class TelegramVideoBot:
         if file_size_mb > config.TELEGRAM_VIDEO_SIZE_LIMIT_MB:
             return await self._send_as_document(message, result, processing_msg, file_size_mb)
 
-        if await self._send_as_video(message, result, processing_msg, file_size_mb):
+        error = await self._send_as_video(message, result, processing_msg, file_size_mb)
+        if error is None:
             return True
+
+        if not upload_retry_is_safe(error):
+            await self.safe_edit(
+                processing_msg,
+                "⚠️ Telegram stopped responding while accepting the upload. "
+                "The video may still have been posted — check the chat before retrying.",
+            )
+            return False
 
         # Telegram rejects some containers as playable video but accepts them as
         # a file, so a document is a genuinely useful fallback rather than noise.
@@ -755,7 +787,7 @@ class TelegramVideoBot:
                 document=result['filepath'],
                 caption=caption,
                 parse_mode=ParseMode.HTML,
-                write_timeout=config.UPLOAD_TIMEOUT_SECONDS,
+                **MEDIA_TIMEOUTS,
             )
         )
         if error is None:
@@ -767,8 +799,9 @@ class TelegramVideoBot:
         return False
 
     async def _send_as_video(self, message: Message, result: Dict[str, Any],
-                             processing_msg: Message, file_size_mb: float) -> bool:
-        """Send file as video with proper parameters"""
+                             processing_msg: Message,
+                             file_size_mb: float) -> Optional[BaseException]:
+        """Send file as video. Returns None on success, else the last error."""
         await self.safe_edit(
             processing_msg, f"📤 Uploading {format_size(result.get('filesize'))}…"
         )
@@ -778,7 +811,7 @@ class TelegramVideoBot:
             'caption': self._create_caption(result, file_size_mb),
             'parse_mode': ParseMode.HTML,
             'supports_streaming': True,
-            'write_timeout': config.UPLOAD_TIMEOUT_SECONDS,
+            **MEDIA_TIMEOUTS,
         }
 
         duration = result.get('duration')
@@ -808,10 +841,9 @@ class TelegramVideoBot:
 
         if error is None:
             logger.info("Video sent successfully (%.1fMB)", file_size_mb)
-            return True
-
-        logger.error("Failed to send video: %s", error)
-        return False
+        else:
+            logger.error("Failed to send video: %s", error)
+        return error
 
     async def _attempt_send(self, send) -> Optional[BaseException]:
         """Run an upload with retries. Returns None on success, else the last error."""
@@ -831,6 +863,11 @@ class TelegramVideoBot:
             except (TimedOut, NetworkError) as exc:
                 last_error = exc
                 logger.warning("Upload attempt %d failed: %s", attempt, exc)
+                if not upload_retry_is_safe(exc):
+                    # The whole body reached Telegram and only the reply was lost,
+                    # so a retry would post the same media a second time.
+                    logger.error("Not retrying: Telegram may already have accepted the upload")
+                    return exc
                 if attempt < config.MAX_UPLOAD_RETRIES:
                     await asyncio.sleep(min(2 ** attempt, 15))
             except TelegramError as exc:
@@ -920,37 +957,46 @@ class TelegramVideoBot:
     async def _post_shutdown(self, application: Application) -> None:
         await asyncio.to_thread(self.downloader.close)
 
+    def build_application(self) -> Application:
+        """Construct the Application with timeouts that suit large file transfers."""
+        builder = Application.builder().token(self.token)
+
+        if config.TELEGRAM_API_BASE_URL:
+            base_url = config.TELEGRAM_API_BASE_URL.rstrip('/')
+            if not base_url.endswith('/bot'):
+                base_url += '/bot'
+            logger.info("Using local Bot API server at %s", base_url)
+            builder = builder.base_url(base_url).local_mode(True)
+
+        return (
+            builder
+            # Without this PTB handles updates strictly one at a time, so a
+            # single download would block every other chat.
+            .concurrent_updates(True)
+            .connect_timeout(60)
+            .read_timeout(config.UPLOAD_TIMEOUT_SECONDS)
+            .write_timeout(config.UPLOAD_TIMEOUT_SECONDS)
+            # PTB ignores write_timeout for requests carrying a file and uses
+            # this instead. Its 20 second default fails any sizeable upload.
+            .media_write_timeout(config.UPLOAD_TIMEOUT_SECONDS)
+            .pool_timeout(60)
+            .get_updates_read_timeout(60)
+            .connection_pool_size(max(8, config.MAX_CONCURRENT_DOWNLOADS * 4))
+            .post_init(self._post_init)
+            .post_shutdown(self._post_shutdown)
+            .build()
+        )
+
     def run(self) -> None:
         """Start the bot with proper configuration"""
         logger.info("Initializing Telegram Video Bot...")
 
         try:
-            builder = Application.builder().token(self.token)
-
-            if config.TELEGRAM_API_BASE_URL:
-                base_url = config.TELEGRAM_API_BASE_URL.rstrip('/')
-                if not base_url.endswith('/bot'):
-                    base_url += '/bot'
-                logger.info("Using local Bot API server at %s", base_url)
-                builder = builder.base_url(base_url).local_mode(True)
-
-            self.application = (
-                builder
-                # Without this PTB handles updates strictly one at a time, so a
-                # single download would block every other chat.
-                .concurrent_updates(True)
-                .connect_timeout(60)
-                .read_timeout(config.UPLOAD_TIMEOUT_SECONDS)
-                .write_timeout(config.UPLOAD_TIMEOUT_SECONDS)
-                .media_write_timeout(config.UPLOAD_TIMEOUT_SECONDS)
-                .pool_timeout(60)
-                .get_updates_read_timeout(60)
-                .connection_pool_size(max(8, config.MAX_CONCURRENT_DOWNLOADS * 4))
-                .post_init(self._post_init)
-                .post_shutdown(self._post_shutdown)
-                .build()
+            self.application = self.build_application()
+            logger.info(
+                "Application created (media upload timeout: %ss, PTB's default is 20s)",
+                self.application.bot.request._media_write_timeout,
             )
-            logger.info("Application created with optimized timeouts")
 
             self._register_handlers()
 

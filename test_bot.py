@@ -11,6 +11,7 @@ import html
 import re
 import threading
 
+import httpx
 import pytest
 from unittest.mock import AsyncMock, Mock
 
@@ -573,8 +574,100 @@ async def test_upload_retries_on_network_errors(bot, tmp_path, monkeypatch):
     message = MockMessage("x")
     message.reply_video = AsyncMock(side_effect=[TimedOut(), TimedOut(), None])
 
-    assert await bot._send_as_video(message, result, message.status_message, 1.0) is True
+    assert await bot._send_as_video(message, result, message.status_message, 1.0) is None
     assert message.reply_video.await_count == 3
+
+
+# ----------------------------------------------------------------------------
+# Upload timeouts
+#
+# python-telegram-bot swaps `write_timeout` for `media_write_timeout` on any
+# request carrying a file, and that default is 20 seconds. A 20MB video on a
+# slow uplink blows straight through it, so both the builder and every
+# individual media call have to override it.
+# ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("sender,reply_method", [
+    ('_send_as_video', 'reply_video'),
+    ('_send_as_document', 'reply_document'),
+    ('_send_screenshot', 'reply_photo'),
+])
+async def test_media_sends_override_the_20s_default(bot, tmp_path, sender, reply_method):
+    result = make_video(tmp_path)
+    message = MockMessage("x")
+
+    args = (message, result, message.status_message)
+    if sender != '_send_screenshot':
+        args = args + (1.0,)
+    await getattr(bot, sender)(*args)
+
+    kwargs = getattr(message, reply_method).await_args.kwargs
+    assert kwargs['write_timeout'] == config.UPLOAD_TIMEOUT_SECONDS
+    assert kwargs['read_timeout'] == config.UPLOAD_TIMEOUT_SECONDS
+    assert kwargs['write_timeout'] > 20
+
+
+def test_upload_timeout_cannot_be_configured_below_a_minute(monkeypatch):
+    """A sub-minute media timeout is the exact bug this guards against."""
+    import importlib
+
+    monkeypatch.setenv('UPLOAD_TIMEOUT_SECONDS', '15')
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.UPLOAD_TIMEOUT_SECONDS == 60
+    finally:
+        monkeypatch.delenv('UPLOAD_TIMEOUT_SECONDS', raising=False)
+        importlib.reload(config)
+
+
+def test_built_application_raises_ptbs_media_timeout(bot):
+    """The builder must override media_write_timeout, not just write_timeout."""
+    application = bot.build_application()
+    request = application.bot.request
+
+    assert request._media_write_timeout == config.UPLOAD_TIMEOUT_SECONDS
+    assert request._media_write_timeout > 20
+    assert request._client.timeout.read == config.UPLOAD_TIMEOUT_SECONDS
+
+
+def test_write_timeout_is_the_retryable_kind():
+    from telegram.error import TimedOut
+
+    error = TimedOut()
+    error.__cause__ = httpx.WriteTimeout("body never finished sending")
+    assert telegram_bot.upload_retry_is_safe(error) is True
+
+
+def test_read_timeout_is_not_retried():
+    """Telegram may already have posted the video; retrying would duplicate it."""
+    from telegram.error import TimedOut
+
+    error = TimedOut()
+    error.__cause__ = httpx.ReadTimeout("upload sent, reply never arrived")
+    assert telegram_bot.upload_retry_is_safe(error) is False
+
+
+async def test_read_timeout_stops_after_one_attempt(bot, tmp_path, monkeypatch):
+    from telegram.error import TimedOut
+
+    monkeypatch.setattr(config, 'MAX_UPLOAD_RETRIES', 3)
+    monkeypatch.setattr(asyncio, 'sleep', AsyncMock())
+
+    def read_timeout():
+        error = TimedOut()
+        error.__cause__ = httpx.ReadTimeout("reply never arrived")
+        return error
+
+    result = make_video(tmp_path)
+    message = MockMessage("x")
+    message.reply_video = AsyncMock(side_effect=read_timeout())
+
+    assert await bot._send_video_with_retry(message, result, message.status_message) is False
+    # One attempt only, and no document fallback - both would risk a duplicate post.
+    assert message.reply_video.await_count == 1
+    message.reply_document.assert_not_awaited()
+    assert any('may still have been posted' in (text or '')
+               for text in message.status_message.texts)
 
 
 async def test_upload_gives_up_after_max_retries(bot, tmp_path, monkeypatch):

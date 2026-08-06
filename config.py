@@ -110,8 +110,10 @@ MAX_CONCURRENT_DOWNLOADS = _get_int('MAX_CONCURRENT_DOWNLOADS', 3, minimum=1, ma
 #: Give up on a single download after this long.
 DOWNLOAD_TIMEOUT_SECONDS = _get_int('DOWNLOAD_TIMEOUT_SECONDS', 900, minimum=30)
 
-#: Give up on a single upload attempt after this long.
-UPLOAD_TIMEOUT_SECONDS = _get_int('UPLOAD_TIMEOUT_SECONDS', 300, minimum=10)
+#: Give up on a single upload attempt after this long. This drives python-telegram-bot's
+#: media_write_timeout, whose 20 second default is far too short: a 20MB video on a
+#: 1MB/s uplink needs ~20s of pure write time, so anything under a minute is a footgun.
+UPLOAD_TIMEOUT_SECONDS = _get_int('UPLOAD_TIMEOUT_SECONDS', 300, minimum=60)
 
 #: Attempts per upload before reporting failure.
 MAX_UPLOAD_RETRIES = _get_int('MAX_UPLOAD_RETRIES', 3, minimum=1, maximum=10)
@@ -203,6 +205,7 @@ def describe() -> str:
         f"download_dir={DOWNLOAD_DIR} "
         f"max_download={MAX_DOWNLOAD_SIZE_MB}MB max_upload={MAX_UPLOAD_SIZE_MB}MB "
         f"concurrency={MAX_CONCURRENT_DOWNLOADS} "
+        f"upload_timeout={UPLOAD_TIMEOUT_SECONDS}s "
         f"privileged_chats={len(PRIVATE_CHAT_IDS)} "
         f"local_api={'yes' if USE_LOCAL_BOT_API else 'no'}"
     )
