@@ -1,4 +1,4 @@
-pwd### Python template
+### Python template
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -163,3 +163,15 @@ cython_debug/
 #.idea/
 
 .idea/
+
+### Local-only (never push)
+# Real secrets live in .env; only the template is shared.
+.env.*
+!.env.example
+# Downloaded media and screenshots
+*.mp4
+*.webm
+*.mkv
+# OS and IDE leftovers
+.DS_Store
+.jbeval/

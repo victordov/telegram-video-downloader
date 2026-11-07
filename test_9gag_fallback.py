@@ -53,7 +53,8 @@ def test_9gag_fallback_download():
     )
 
     with patch("video_downloader.yt_dlp.YoutubeDL", FakeYDL), \
-         patch("video_downloader.requests.get", side_effect=[fake_page_response, fake_media_response]):
+         patch.object(downloader._session, "get",
+                      side_effect=[fake_page_response, fake_media_response]):
         result = downloader.download_video("https://9gag.com/gag/avyKyAd")
 
     assert result is not None

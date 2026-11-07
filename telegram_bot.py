@@ -268,6 +268,7 @@ class TelegramVideoBot:
             concurrent_fragments=config.CONCURRENT_FRAGMENTS,
             socket_timeout=config.SOCKET_TIMEOUT_SECONDS,
             retries=config.DOWNLOAD_RETRIES,
+            force_mp4=config.FORCE_MP4,
         )
         self.application: Optional[Application] = None
         self.stats = BotStats()
@@ -432,8 +433,7 @@ class TelegramVideoBot:
 
         candidate_text = ' '.join(context.args or []) if context else ''
         if not candidate_text and message.reply_to_message:
-            replied = message.reply_to_message
-            candidate_text = replied.text or replied.caption or ''
+            candidate_text = self._message_text(message.reply_to_message)
 
         urls = [url for url in self.extract_urls(candidate_text)
                 if self.downloader.detect_platform(url)]
@@ -450,6 +450,11 @@ class TelegramVideoBot:
         await asyncio.gather(*(self.process_video_url(message, url) for url in urls))
 
     # -- URL extraction --------------------------------------------------
+
+    @staticmethod
+    def _message_text(message: Message) -> str:
+        """Text or caption of a message, tolerant of partially-populated objects."""
+        return getattr(message, 'text', None) or getattr(message, 'caption', None) or ''
 
     @staticmethod
     def _trim_url(url: str) -> str:
@@ -479,8 +484,7 @@ class TelegramVideoBot:
 
     def urls_from_message(self, message: Message) -> List[str]:
         """Collect URLs from the message body plus any hyperlinked text."""
-        text = (getattr(message, 'text', None) or getattr(message, 'caption', None) or '')
-        urls = self.extract_urls(text)
+        urls = self.extract_urls(self._message_text(message))
 
         entities = (
             getattr(message, 'entities', None)
@@ -511,7 +515,7 @@ class TelegramVideoBot:
         if not message:
             return
 
-        text = (getattr(message, 'text', None) or getattr(message, 'caption', None) or '')
+        text = self._message_text(message)
         if not text:
             return
 
@@ -995,7 +999,7 @@ class TelegramVideoBot:
             self.application = self.build_application()
             logger.info(
                 "Application created (media upload timeout: %ss, PTB's default is 20s)",
-                self.application.bot.request._media_write_timeout,
+                getattr(self.application.bot.request, '_media_write_timeout', 'unknown'),
             )
 
             self._register_handlers()

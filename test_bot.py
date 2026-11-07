@@ -185,7 +185,6 @@ def test_urls_from_message_includes_caption_and_text_links(bot):
 ])
 def test_detect_platform(bot, url, platform):
     assert bot.downloader.detect_platform(url) == platform
-    assert bot.downloader.is_video_url(url) is (platform is not None)
 
 
 # ----------------------------------------------------------------------------

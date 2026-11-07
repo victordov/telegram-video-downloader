@@ -19,7 +19,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import requests
+import requests  # session only; all HTTP goes through VideoDownloader._session
 import yt_dlp
 
 MB = 1024 * 1024
@@ -152,11 +152,6 @@ class VideoDownloader:
         for platform, patterns in URL_PATTERNS.items()
     }
 
-    #: Platforms whose links always point at a video.
-    ALWAYS_VIDEO_PLATFORMS = frozenset(
-        {'youtube', 'tiktok', 'facebook', 'twitter', '9gag', 'vk', 'instagram'}
-    )
-
     #: Per-platform cap on the requested video height.
     PLATFORM_MAX_HEIGHT = {'youtube': 720, 'vk': 720}
 
@@ -169,7 +164,7 @@ class VideoDownloader:
                  cookies_from_browser: Optional[str] = None,
                  ffmpeg_location: Optional[str] = None,
                  concurrent_fragments: int = 4, socket_timeout: int = 30,
-                 retries: int = 3):
+                 retries: int = 3, force_mp4: bool = True):
         """Initialize the video downloader
 
         Args:
@@ -182,6 +177,8 @@ class VideoDownloader:
             concurrent_fragments: Parallel fragment downloads for HLS/DASH.
             socket_timeout: Per-socket timeout handed to yt-dlp.
             retries: Retry budget handed to yt-dlp.
+            force_mp4: Normalize finished downloads to H.264/AAC MP4 for Apple
+                playback. Needs ffmpeg; ignored when it is unavailable.
         """
         self.download_dir = download_dir or tempfile.gettempdir()
         self.max_filesize_mb = max_filesize_mb
@@ -192,6 +189,7 @@ class VideoDownloader:
         self.concurrent_fragments = concurrent_fragments
         self.socket_timeout = socket_timeout
         self.retries = retries
+        self.force_mp4 = force_mp4
         self.logger = logging.getLogger(__name__)
 
         self._session = requests.Session()
@@ -254,72 +252,6 @@ class VideoDownloader:
         self.logger.debug("No platform matched URL: %s", url)
         return None
 
-    def is_video_url(self, url: str) -> bool:
-        """Check if URL is from a supported video platform
-
-        Args:
-            url: URL to check
-
-        Returns:
-            True if URL is from supported platform, False otherwise
-        """
-        return self.detect_platform(url) is not None
-
-    def check_for_video(self, url: str) -> bool:
-        """Check if a URL contains a video
-
-        Only Threads posts need an actual lookup; every other supported platform
-        links straight to a video. The Threads check is a plain HTTP fetch, which
-        is orders of magnitude cheaper than spinning up a headless browser.
-
-        Args:
-            url: URL to check
-
-        Returns:
-            True if URL contains a video, False otherwise
-        """
-        platform = self.detect_platform(url)
-
-        if not platform:
-            self.logger.info("URL is not from a supported platform: %s", url)
-            return False
-
-        if platform != 'threads':
-            return True
-
-        return self._threads_has_video(url)
-
-    def _threads_has_video(self, url: str) -> bool:
-        """Cheap HTTP probe for a video on a Threads post."""
-        try:
-            response = self._session.get(
-                url,
-                headers={'User-Agent': MOBILE_USER_AGENT},
-                timeout=15,
-                allow_redirects=True,
-            )
-            response.raise_for_status()
-            html = response.text
-        except Exception as exc:
-            # Inconclusive: let yt-dlp try, it falls back to a screenshot anyway.
-            self.logger.warning("Could not probe Threads post %s (%s), assuming video", url, exc)
-            return True
-
-        video_markers = (
-            'og:video',
-            'video_versions',
-            '"is_video":true',
-            'twitter:player:stream',
-            '<video',
-        )
-        for marker in video_markers:
-            if marker in html:
-                self.logger.info("Threads post %s looks like a video (marker: %s)", url, marker)
-                return True
-
-        self.logger.info("Threads post %s has no video markers, will screenshot", url)
-        return False
-
     # ------------------------------------------------------------------
     # yt-dlp configuration
     # ------------------------------------------------------------------
@@ -333,7 +265,27 @@ class VideoDownloader:
         if self.has_ffmpeg:
             # Separate video+audio streams give much better quality per byte, but
             # they need ffmpeg to be merged back together.
-            return (
+            #
+            # Apple's players decode H.264/HEVC + AAC only, so ask for those
+            # first: a site that offers both VP9/Opus and H.264/AAC (YouTube
+            # always does) then needs no transcode at all. The codec-agnostic
+            # tiers below stay as a last resort and are repaired afterwards by
+            # _ensure_ios_compatible_video.
+            if self.force_mp4:
+                preferred = (
+                    f'bv*[vcodec^=avc1][height<=?{height}][filesize<{size}M]+ba[acodec^=mp4a]/'
+                    f'bv*[vcodec^=avc1][height<=?{height}][filesize<{size}M]+ba/'
+                    f'b[ext=mp4][height<=?{height}][filesize<{size}M]/'
+                    f'bv*[vcodec^=avc1][height<=?{height}][filesize_approx<{size}M]+ba[acodec^=mp4a]/'
+                    f'bv*[vcodec^=avc1][height<=?{height}][filesize_approx<{size}M]+ba/'
+                    f'b[ext=mp4][height<=?{height}][filesize_approx<{size}M]/'
+                    f'bv*[vcodec^=avc1][height<=?{height}]+ba/'
+                    f'b[ext=mp4][height<=?{height}]/'
+                )
+            else:
+                preferred = ''
+
+            return preferred + (
                 f'bv*[height<=?{height}][filesize<{size}M]+ba/'
                 f'b[height<=?{height}][filesize<{size}M]/'
                 f'bv*[height<=?{height}][filesize_approx<{size}M]+ba/'
@@ -341,7 +293,17 @@ class VideoDownloader:
                 f'bv*[height<=?{height}]+ba/b[height<=?{height}]/bv*+ba/b'
             )
 
-        return (
+        # Without ffmpeg nothing can be merged or repaired later, so a
+        # progressive MP4 is the only thing guaranteed to play on Apple devices.
+        preferred = ''
+        if self.force_mp4:
+            preferred = (
+                f'b[ext=mp4][height<=?{height}][filesize<{size}M]/'
+                f'b[ext=mp4][height<=?{height}][filesize_approx<{size}M]/'
+                f'b[ext=mp4][height<=?{height}]/b[ext=mp4]/'
+            )
+
+        return preferred + (
             f'b[height<=?{height}][filesize<{size}M]/'
             f'b[height<=?{height}][filesize_approx<{size}M]/'
             f'b[filesize<{size}M]/b[height<=?{height}]/b'
@@ -704,19 +666,17 @@ class VideoDownloader:
             if candidate and os.path.exists(candidate):
                 return candidate
 
-        # yt-dlp may have remuxed to a different container.
+        # yt-dlp may have remuxed to a different container, and multi-video
+        # posts get a " #N" suffix appended.
+        extensions = ('.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v')
+        suffixes = ('',) + tuple(f' #{index}' for index in range(1, 10))
         for candidate in candidates:
             if not candidate:
                 continue
             base_name = os.path.splitext(candidate)[0]
-            for ext in ('.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v'):
-                test_path = base_name + ext
-                if os.path.exists(test_path):
-                    return test_path
-            # Multi-video posts get a " #1" suffix appended by yt-dlp.
-            for index in range(1, 10):
-                for ext in ('.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4v'):
-                    test_path = f"{base_name} #{index}{ext}"
+            for suffix in suffixes:
+                for ext in extensions:
+                    test_path = f"{base_name}{suffix}{ext}"
                     if os.path.exists(test_path):
                         return test_path
 
@@ -833,6 +793,11 @@ class VideoDownloader:
                     self._purge_partials(download_info)
                     return self._error('download_failed', title=title, platform=platform)
 
+                # Format selection asks for H.264/AAC first, but some sites only
+                # serve WebM. Repair those before the size check, since a
+                # transcode changes the file we actually hand to Telegram.
+                filename = self._ensure_ios_compatible_video(filename, platform)
+
                 actual_filesize = os.path.getsize(filename)
                 self.logger.info(
                     "Download complete - File: %s, Size: %.1fMB", filename, actual_filesize / MB
@@ -926,7 +891,7 @@ class VideoDownloader:
         html = None
         for page_url in [url, url.replace('://9gag.com', '://www.9gag.com')]:
             try:
-                response = requests.get(page_url, headers=headers, timeout=20)
+                response = self._session.get(page_url, headers=headers, timeout=20)
                 response.raise_for_status()
                 html = response.text
                 break
@@ -951,7 +916,8 @@ class VideoDownloader:
 
         for candidate in derived_candidates:
             try:
-                probe = requests.head(candidate, headers=headers, timeout=10, allow_redirects=True)
+                probe = self._session.head(candidate, headers=headers, timeout=10,
+                                           allow_redirects=True)
                 if probe.ok:
                     return candidate
             except Exception:
@@ -969,6 +935,13 @@ class VideoDownloader:
         headers = {'Referer': 'https://9gag.com/', 'Accept': '*/*'}
         size_limit = self.max_filesize_bytes
 
+        def too_large(filesize: int) -> Dict[str, Any]:
+            return self._error(
+                'file_too_large',
+                message=f'Video file is too large to download (limit: {self.max_filesize_mb}MB)',
+                filesize=filesize, title=basename, platform=platform, duration=None,
+            )
+
         parsed = urlparse(media_url)
         basename = os.path.basename(parsed.path) or f"{platform}_video.mp4"
         if not basename.lower().endswith('.mp4'):
@@ -977,19 +950,14 @@ class VideoDownloader:
         timestamp = int(time.time())
         filename = os.path.join(self.download_dir, f"{timestamp}_{basename}")
 
-        response = requests.get(media_url, headers=headers, timeout=30, stream=True)
+        response = self._session.get(media_url, headers=headers, timeout=30, stream=True)
         response.raise_for_status()
 
         content_length = int(response.headers.get('Content-Length', 0) or 0)
         if content_length > size_limit:
-            return self._error(
-                'file_too_large',
-                message=f'Video file is too large to download (limit: {self.max_filesize_mb}MB)',
-                filesize=content_length, title=basename, platform=platform, duration=None,
-            )
+            return too_large(content_length)
 
         written = 0
-        oversized = False
         with open(filename, 'wb') as output_file:
             for chunk in response.iter_content(chunk_size=64 * 1024):
                 if not chunk:
@@ -997,29 +965,20 @@ class VideoDownloader:
                 output_file.write(chunk)
                 written += len(chunk)
                 if written > size_limit:
-                    oversized = True
                     break
 
-        if oversized:
+        if written > size_limit:
             self.cleanup_file(filename)
-            return self._error(
-                'file_too_large',
-                message=f'Video file is too large to download (limit: {self.max_filesize_mb}MB)',
-                filesize=written, title=basename, platform=platform, duration=None,
-            )
+            return too_large(written)
 
-        # 9GAG direct files can use codec/container combinations that fail on iPhone.
-        # Normalize to a more broadly compatible MP4 when tools are available.
+        # Direct CDN files can use codec/container combinations that fail on
+        # iPhone. Normalize to a compatible MP4 when the tools are available.
         filename = self._ensure_ios_compatible_video(filename, platform)
         written = os.path.getsize(filename)
 
         if written > size_limit:
             self.cleanup_file(filename)
-            return self._error(
-                'file_too_large',
-                message=f'Video file is too large to download (limit: {self.max_filesize_mb}MB)',
-                filesize=written, title=basename, platform=platform, duration=None,
-            )
+            return too_large(written)
 
         width, height = self._probe_video_dimensions(filename)
         return {
@@ -1037,42 +996,49 @@ class VideoDownloader:
     # ffmpeg helpers
     # ------------------------------------------------------------------
 
-    def _probe_video_dimensions(self, filepath: str) -> Tuple[Optional[int], Optional[int]]:
-        """Return (width, height) of the video file using ffprobe, or (None, None) on failure."""
+    def _ffprobe_entries(self, filepath: str, entries: str,
+                         select_streams: Optional[str] = None) -> Optional[Dict[str, str]]:
+        """Run ffprobe and return the requested entries as a key -> value dict.
+
+        Returns None when ffprobe is unavailable or fails to run, an empty dict
+        when it ran but found nothing (e.g. the stream does not exist).
+        """
         ffprobe_path = self._ffprobe_binary()
         if not ffprobe_path or not os.path.exists(filepath):
-            return None, None
+            return None
+        cmd = [ffprobe_path, '-v', 'error']
+        if select_streams:
+            cmd += ['-select_streams', select_streams]
+        cmd += ['-show_entries', entries,
+                '-of', 'default=noprint_wrappers=1:nokey=0', filepath]
         try:
-            cmd = [
-                ffprobe_path, '-v', 'error', '-select_streams', 'v:0',
-                '-show_entries', 'stream=width,height',
-                '-of', 'default=noprint_wrappers=1:nokey=0', filepath,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
-            width = height = None
-            for line in result.stdout.splitlines():
-                if line.startswith('width='):
-                    width = int(line.split('=', 1)[1].strip())
-                elif line.startswith('height='):
-                    height = int(line.split('=', 1)[1].strip())
-            return width, height
-        except Exception:
-            return None, None
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)
+        except Exception as exc:
+            self.logger.debug("ffprobe failed for %s: %s", filepath, exc)
+            return None
+        values: Dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            key, sep, value = line.partition('=')
+            if sep:
+                values[key.strip()] = value.strip()
+        return values
+
+    def _probe_video_dimensions(self, filepath: str) -> Tuple[Optional[int], Optional[int]]:
+        """Return (width, height) of the video file using ffprobe, or (None, None) on failure."""
+        values = self._ffprobe_entries(filepath, 'stream=width,height', 'v:0') or {}
+
+        def to_int(raw: Optional[str]) -> Optional[int]:
+            try:
+                return int(raw) if raw else None
+            except ValueError:
+                return None
+
+        return to_int(values.get('width')), to_int(values.get('height'))
 
     def probe_duration(self, filepath: str) -> Optional[float]:
         """Return the media duration in seconds via ffprobe, or None."""
-        ffprobe_path = self._ffprobe_binary()
-        if not ffprobe_path or not os.path.exists(filepath):
-            return None
-        try:
-            cmd = [
-                ffprobe_path, '-v', 'error', '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1', filepath,
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
-            return self._normalize_duration(result.stdout.strip())
-        except Exception:
-            return None
+        values = self._ffprobe_entries(filepath, 'format=duration') or {}
+        return self._normalize_duration(values.get('duration'))
 
     def generate_thumbnail(self, filepath: str) -> Optional[str]:
         """Extract a poster frame so Telegram shows something other than a black box.
@@ -1103,84 +1069,100 @@ class VideoDownloader:
             self.logger.debug("Thumbnail generation failed: %s", exc)
             return None
 
+    #: Video codecs Apple's decoders accept. Everything WebM carries (VP8, VP9,
+    #: AV1) is absent, which is why those files fail on iPhone and macOS.
+    APPLE_VIDEO_CODECS = frozenset({'h264', 'hevc'})
+
+    #: Audio codecs Apple accepts in an MP4. Opus and Vorbis are not among them.
+    APPLE_AUDIO_CODECS = frozenset({'aac', 'mp4a', 'alac'})
+
     def _ensure_ios_compatible_video(self, filepath: str, platform: str) -> str:
-        """Repackage/transcode fallback videos to improve iPhone playback compatibility."""
-        if platform != '9gag' or not os.path.exists(filepath):
+        """Normalize a download to H.264/AAC MP4 so it plays on iPhone and macOS.
+
+        Chooses the cheapest repair that works: streams already in an Apple
+        codec are copied rather than re-encoded, so a WebM holding H.264 is
+        only rewrapped, and an MP4 whose audio alone is Opus keeps its video
+        untouched. Returns the original path unchanged if anything goes wrong,
+        so a normalization failure can never lose the download.
+        """
+        if not self.force_mp4 or not os.path.exists(filepath):
             return filepath
 
         ffmpeg_path = self._ffmpeg_binary()
         ffprobe_path = self._ffprobe_binary()
         if not ffmpeg_path or not ffprobe_path:
-            self.logger.warning("ffmpeg/ffprobe not found, skipping iOS compatibility normalization")
+            self.logger.warning("ffmpeg/ffprobe not found, skipping MP4 normalization")
             return filepath
 
-        video_codec = None
-        audio_codec = None
-        pix_fmt = None
-        try:
-            probe_cmd = [
-                ffprobe_path, '-v', 'error', '-select_streams', 'v:0',
-                '-show_entries', 'stream=codec_name,pix_fmt',
-                '-of', 'default=noprint_wrappers=1:nokey=0', filepath,
-            ]
-            video_probe = subprocess.run(probe_cmd, capture_output=True, text=True,
-                                         check=False, timeout=60)
-            for line in video_probe.stdout.splitlines():
-                if line.startswith('codec_name='):
-                    video_codec = line.split('=', 1)[1].strip().lower()
-                elif line.startswith('pix_fmt='):
-                    pix_fmt = line.split('=', 1)[1].strip().lower()
-
-            audio_cmd = [
-                ffprobe_path, '-v', 'error', '-select_streams', 'a:0',
-                '-show_entries', 'stream=codec_name',
-                '-of', 'default=noprint_wrappers=1:nokey=0', filepath,
-            ]
-            audio_probe = subprocess.run(audio_cmd, capture_output=True, text=True,
-                                         check=False, timeout=60)
-            for line in audio_probe.stdout.splitlines():
-                if line.startswith('codec_name='):
-                    audio_codec = line.split('=', 1)[1].strip().lower()
-                    break
-        except Exception as probe_error:
-            self.logger.warning("ffprobe failed, skipping compatibility check: %s", probe_error)
+        video_info = self._ffprobe_entries(filepath, 'stream=codec_name,pix_fmt', 'v:0')
+        audio_info = self._ffprobe_entries(filepath, 'stream=codec_name', 'a:0')
+        format_info = self._ffprobe_entries(filepath, 'format=format_name')
+        if video_info is None or audio_info is None or format_info is None:
+            self.logger.warning("ffprobe failed, skipping compatibility check")
             return filepath
 
-        needs_transcode = (
-            video_codec != 'h264' or
-            (audio_codec not in (None, 'aac', 'mp4a')) or
-            (pix_fmt not in (None, 'yuv420p'))
-        )
+        video_codec = video_info.get('codec_name', '').lower() or None
+        pix_fmt = video_info.get('pix_fmt', '').lower() or None
+        audio_codec = audio_info.get('codec_name', '').lower() or None
+        # ffprobe reports MP4 as the family "mov,mp4,m4a,3gp,3g2,mj2".
+        container = format_info.get('format_name', '').lower()
+
+        # A missing stream is fine; only a present-and-wrong one needs work.
+        video_ok = video_codec is None or video_codec in self.APPLE_VIDEO_CODECS
+        audio_ok = audio_codec is None or audio_codec in self.APPLE_AUDIO_CODECS
+        # 10-bit/4:4:4 H.264 decodes nowhere on iOS, so treat it as incompatible.
+        pixels_ok = pix_fmt is None or pix_fmt in ('yuv420p', 'yuvj420p')
+
+        keep_video = video_ok and pixels_ok
+        cmd = [ffmpeg_path, '-y', '-loglevel', 'error', '-i', filepath]
+
+        if keep_video:
+            cmd += ['-c:v', 'copy']
+            # Apple rejects HEVC tagged hev1; hvc1 is the same bitstream.
+            if video_codec == 'hevc':
+                cmd += ['-tag:v', 'hvc1']
+        else:
+            cmd += ['-c:v', 'libx264', '-profile:v', 'main', '-level', '4.0',
+                    '-pix_fmt', 'yuv420p', '-crf', '23', '-preset', 'veryfast']
+
+        if audio_ok:
+            cmd += ['-c:a', 'copy']
+        else:
+            cmd += ['-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '44100']
+
+        # +faststart moves the moov atom to the front so playback can begin
+        # before the whole file arrives - Telegram's inline player needs it.
+        cmd += ['-movflags', '+faststart']
 
         base, ext = os.path.splitext(filepath)
-        output_path = f"{base}_ios{ext or '.mp4'}"
+        output_path = f"{base}_ios.mp4"
+        if os.path.abspath(output_path) == os.path.abspath(filepath):
+            output_path = f"{base}_ios_norm.mp4"
+        cmd.append(output_path)
 
-        if needs_transcode:
-            cmd = [
-                ffmpeg_path, '-y', '-loglevel', 'error', '-i', filepath,
-                '-c:v', 'libx264', '-profile:v', 'main', '-level', '4.0',
-                '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                '-c:a', 'aac', '-b:a', '128k', '-ac', '2', '-ar', '44100',
-                output_path,
-            ]
-            self.logger.info("Transcoding 9GAG video for iPhone compatibility")
+        if keep_video and audio_ok and 'mp4' in container:
+            action = "Remuxing %s video with faststart"
         else:
-            cmd = [
-                ffmpeg_path, '-y', '-loglevel', 'error', '-i', filepath,
-                '-c', 'copy', '-movflags', '+faststart', output_path,
-            ]
-            self.logger.info("Remuxing 9GAG video with faststart for better compatibility")
+            action = "Normalizing %s video to H.264/AAC MP4 for Apple playback"
+        self.logger.info(
+            action + " (container=%s, video=%s, audio=%s)",
+            platform, ext.lstrip('.') or 'unknown', video_codec, audio_codec,
+        )
 
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=600)
             if proc.returncode != 0 or not os.path.exists(output_path):
-                self.logger.warning("Compatibility normalization failed, using original fallback file")
+                self.logger.warning(
+                    "MP4 normalization failed (%s), using the original file",
+                    (proc.stderr or '').strip()[:200] or f"exit {proc.returncode}",
+                )
                 self.cleanup_file(output_path)
                 return filepath
             self.cleanup_file(filepath)
             return output_path
         except Exception as ffmpeg_error:
-            self.logger.warning("Compatibility normalization error: %s", ffmpeg_error)
+            self.logger.warning("MP4 normalization error: %s", ffmpeg_error)
+            self.cleanup_file(output_path)
             return filepath
 
     # ------------------------------------------------------------------
@@ -1426,32 +1408,3 @@ class VideoDownloader:
             self._session.close()
         except Exception:
             pass
-
-
-# Test function
-def test_downloader():
-    """Print platform detection results for a handful of sample URLs"""
-    downloader = VideoDownloader()
-
-    test_urls = [
-        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-        "https://youtu.be/dQw4w9WgXcQ",
-        "https://www.instagram.com/p/example/",
-        "https://www.instagram.com/reels/DJJ4ngeoYbx/",
-        "https://www.tiktok.com/@user/video/123456789",
-        "https://vt.tiktok.com/ZSkUakqex/",
-        "https://www.facebook.com/watch/?v=123456789",
-        "https://twitter.com/username/status/1234567890",
-        "https://x.com/username/status/1234567890",
-        "https://t.co/abcdef123",
-        "https://www.9gag.com/gag/avyKyAd",
-        "https://vk.com/video-12345_67890",
-        "https://example.com/not-a-video",
-    ]
-
-    for url in test_urls:
-        print(f"{url} -> {downloader.detect_platform(url)}")
-
-
-if __name__ == "__main__":
-    test_downloader()

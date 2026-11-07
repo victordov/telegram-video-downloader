@@ -6,6 +6,7 @@ Run the Telegram bot with a friendly pre-flight check and setup instructions.
 import os
 import shutil
 import sys
+import tempfile
 
 import config
 
@@ -55,6 +56,31 @@ def check_requirements() -> bool:
     return ok
 
 
+def acquire_instance_lock(token: str):
+    """Take an exclusive lock keyed on the bot ID, or None if already held.
+
+    Telegram allows only one getUpdates poller per token; a second local
+    instance would knock the first one offline with endless Conflict errors.
+    The lock is released automatically when the process exits.
+    """
+    try:
+        import fcntl
+    except ImportError:  # non-POSIX platform; skip the guard
+        return True
+
+    bot_id = token.split(':', 1)[0]
+    lock_path = os.path.join(tempfile.gettempdir(), f'telegram-video-bot-{bot_id}.lock')
+    handle = open(lock_path, 'w')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
 def main() -> None:
     """Main function with setup checks"""
     print("🤖 Telegram Video Downloader Bot")
@@ -62,6 +88,13 @@ def main() -> None:
 
     if not check_requirements():
         print(SETUP_INSTRUCTIONS)
+        sys.exit(1)
+
+    lock = acquire_instance_lock(config.TELEGRAM_BOT_TOKEN)
+    if lock is None:
+        print("❌ Another instance of this bot is already running on this machine.")
+        print("   Two pollers with one token fight over getUpdates (Telegram 'Conflict' errors).")
+        print("   Stop the other instance first (e.g. pkill -f run_bot.py).")
         sys.exit(1)
 
     print("\n🚀 Starting bot...")

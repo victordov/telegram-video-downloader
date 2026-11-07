@@ -160,6 +160,11 @@ COOKIES_FROM_BROWSER = _get_str('COOKIES_FROM_BROWSER') or None
 #: Explicit ffmpeg directory when it is not on PATH.
 FFMPEG_LOCATION = _get_str('FFMPEG_LOCATION') or None
 
+#: Normalize downloads to H.264/AAC in MP4 (needs ffmpeg). WebM's VP8/VP9/AV1
+#: video and Opus/Vorbis audio are not decodable by Apple's players, so iPhone
+#: and macOS show a black frame or refuse the file outright.
+FORCE_MP4 = _get_bool('FORCE_MP4', True)
+
 #: Attach a generated poster frame to videos (needs ffmpeg).
 GENERATE_THUMBNAILS = _get_bool('GENERATE_THUMBNAILS', True)
 

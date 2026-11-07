@@ -129,4 +129,3 @@ def test_config_defaults_are_sane():
 ])
 def test_unsupported_urls_are_rejected(downloader, url):
     assert downloader.detect_platform(url) is None
-    assert downloader.is_video_url(url) is False
