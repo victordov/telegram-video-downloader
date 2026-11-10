@@ -11,3 +11,5 @@ conftest.py
 pytest.ini
 requirements-dev.txt
 *.md
+data/
+*.sqlite3*

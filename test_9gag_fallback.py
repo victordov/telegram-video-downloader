@@ -36,7 +36,7 @@ class FakeYDL:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def extract_info(self, url, download=False):
+    def extract_info(self, url, download=False, **kwargs):
         del url, download
         raise Exception("Simulated yt-dlp extractor failure")
 

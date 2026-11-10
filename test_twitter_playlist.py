@@ -25,7 +25,7 @@ class FakeTwitterYDL:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def extract_info(self, url, download=False):
+    def extract_info(self, url, download=False, **kwargs):
         del url, download
         return {
             '_type': 'playlist',
@@ -72,6 +72,10 @@ class FakeTwitterYDL:
             ],
         }
 
+    def process_ie_result(self, info, download=False, extra_info=None):
+        """Real yt-dlp selects formats here; the fake has nothing to select."""
+        return info
+
     def process_info(self, info):
         # Simulate yt-dlp behavior where passing a playlist dict to process_info fails.
         if info.get('_type') == 'playlist':
@@ -83,7 +87,7 @@ class FakeTwitterYDL:
             output.write(b'fake-twitter-video')
 
     def prepare_filename(self, info):
-        directory = os.path.dirname(self.opts['outtmpl'])
+        directory = self.opts['paths']['home']
         return os.path.join(
             directory,
             f"{info.get('title', 'Unknown')} [{info.get('id', 'x')}].{info.get('ext', 'mp4')}"

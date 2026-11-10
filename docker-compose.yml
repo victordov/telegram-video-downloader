@@ -6,8 +6,16 @@ services:
     environment:
       # Staged downloads live on the mounted volume, not the container layer.
       DOWNLOAD_DIR: /app/downloads
+      # Cache, statistics and button links survive rebuilds on this volume.
+      DATABASE_PATH: /app/data/bot.sqlite3
+      # The image is read-only for pip; rebuild to update yt-dlp.
+      YTDLP_AUTO_UPDATE: "false"
     volumes:
       - ./downloads:/app/downloads
+      - ./data:/app/data
+    # Webhook mode only (set WEBHOOK_URL in .env and put HTTPS in front):
+    # ports:
+    #   - "8443:8443"
     restart: unless-stopped
     logging:
       driver: "json-file"

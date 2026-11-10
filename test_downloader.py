@@ -30,13 +30,17 @@ class FakeYDL:
     info = {}
     written = b'fake-video-bytes'
 
-    def extract_info(self, url, download=False):
+    def extract_info(self, url, download=False, **kwargs):
         del url, download
         return dict(self.info)
 
+    def process_ie_result(self, info, download=False, extra_info=None):
+        """Real yt-dlp selects formats here; the fake has nothing to select."""
+        return info
+
     def prepare_filename(self, info):
         return os.path.join(
-            os.path.dirname(self.opts['outtmpl']),
+            self.opts['paths']['home'],
             f"{info.get('title', 'video')}.{info.get('ext', 'mp4')}"
         )
 
@@ -59,9 +63,26 @@ def ydl_factory(info, written=b'fake-video-bytes'):
 
 def test_output_template_includes_the_video_id(downloader):
     """Two different videos with the same title must not clobber each other."""
-    template = downloader.get_ydl_opts('youtube')['outtmpl']
-    assert '%(id)s' in template
-    assert template.startswith(downloader.download_dir)
+    opts = downloader.get_ydl_opts('youtube')
+    assert '%(id)s' in opts['outtmpl']
+    assert opts['paths']['home'] == downloader.download_dir
+
+
+def test_long_titles_keep_the_folder_and_the_id(download_dir):
+    """Regression: trim_file_name used to cut the absolute path, folder and id included."""
+    import yt_dlp
+
+    deep = os.path.join(download_dir, 'a-rather-long-folder-name-' * 4)
+    os.makedirs(deep)
+    downloader = VideoDownloader(download_dir=deep)
+    try:
+        ydl = yt_dlp.YoutubeDL(downloader.get_ydl_opts('youtube'))
+        path = ydl.prepare_filename({'id': 'abcdefghijk', 'title': 'T' * 200, 'ext': 'mp4'})
+    finally:
+        downloader.close()
+
+    assert os.path.dirname(path) == deep
+    assert '[abcdefghijk]' in os.path.basename(path)
 
 
 def test_format_selector_respects_the_size_limit(download_dir):
@@ -232,7 +253,7 @@ def test_live_streams_are_rejected(downloader):
 
 def test_extractor_failures_are_classified(downloader):
     class FailingYDL(FakeYDL):
-        def extract_info(self, url, download=False):
+        def extract_info(self, url, download=False, **kwargs):
             raise Exception("ERROR: Video unavailable")
 
     with patch('video_downloader.yt_dlp.YoutubeDL', FailingYDL):
@@ -282,7 +303,7 @@ def test_progress_callback_errors_do_not_break_the_download(downloader):
 
 def test_threads_failure_falls_back_to_a_screenshot(downloader):
     class FailingYDL(FakeYDL):
-        def extract_info(self, url, download=False):
+        def extract_info(self, url, download=False, **kwargs):
             raise Exception("No video formats found")
 
     shot = {'filepath': '/tmp/shot.png', 'title': 'post', 'platform': 'threads',
@@ -298,7 +319,7 @@ def test_threads_failure_falls_back_to_a_screenshot(downloader):
 
 def test_threads_screenshot_failure_is_reported(downloader):
     class FailingYDL(FakeYDL):
-        def extract_info(self, url, download=False):
+        def extract_info(self, url, download=False, **kwargs):
             raise Exception("No video formats found")
 
     downloader.take_screenshot = Mock(return_value=None)

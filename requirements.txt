@@ -1,5 +1,5 @@
-python-telegram-bot==22.8
-yt-dlp[default]==2026.10.26
+python-telegram-bot[webhooks]==22.8
+yt-dlp[default,curl-cffi]==2026.10.26
 python-dotenv==1.2.4
 requests==2.34.2
 httpx==0.28.1

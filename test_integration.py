@@ -80,7 +80,7 @@ async def test_failed_extraction_leaves_no_files_behind(bot, download_dir):
         def __exit__(self, *args):
             return False
 
-        def extract_info(self, url, download=False):
+        def extract_info(self, url, download=False, **kwargs):
             raise Exception("ERROR: Video unavailable")
 
     update = MockUpdate(MockMessage("https://www.youtube.com/watch?v=dQw4w9WgXcQ"))
@@ -106,7 +106,7 @@ async def test_two_links_in_one_message_produce_two_videos(bot, download_dir):
     base = ydl_factory({'ext': 'mp4'})
 
     class UniqueYDL(base):
-        def extract_info(self, url, download=False):
+        def extract_info(self, url, download=False, **kwargs):
             counter['n'] += 1
             return {'title': f'clip-{counter["n"]}', 'ext': 'mp4', 'duration': 5}
 

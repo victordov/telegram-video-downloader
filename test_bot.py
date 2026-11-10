@@ -57,11 +57,12 @@ class MockMessage:
     """Mock Telegram message for testing"""
 
     def __init__(self, text: str, message_id: int = 1, chat: MockChat = None,
-                 caption: str = None):
+                 caption: str = None, user: MockUser = None):
         self.text = text
         self.caption = caption
         self.message_id = message_id
         self.chat = chat or MockChat()
+        self.from_user = user
         self.entities = []
         self.caption_entities = []
         self.reply_to_message = None
@@ -70,6 +71,9 @@ class MockMessage:
         self.reply_video = AsyncMock()
         self.reply_document = AsyncMock()
         self.reply_photo = AsyncMock()
+        self.reply_audio = AsyncMock()
+        self.reply_animation = AsyncMock()
+        self.reply_media_group = AsyncMock(return_value=())
         self.delete = AsyncMock()
 
 
@@ -87,7 +91,7 @@ class MockUpdate:
 def stub_download(bot, result, record=None):
     """Point the bot's downloader at a canned result."""
 
-    def _download(url, ignore_size_limit=False, progress_callback=None):
+    def _download(url, ignore_size_limit=False, progress_callback=None, **kwargs):
         if record is not None:
             record.append((url, ignore_size_limit, threading.current_thread().name))
         return dict(result, url=url) if isinstance(result, dict) else result
@@ -300,7 +304,7 @@ async def test_status_reports_counters(bot):
     text = message.reply_text.await_args.args[0]
     assert "1</b> ok" in text
     assert "1</b> failed" in text
-    assert "Youtube (1)" in text
+    assert "YouTube (1)" in text
 
 
 async def test_dl_command_forces_download_in_a_group(bot):
@@ -514,7 +518,7 @@ async def test_concurrent_downloads_are_bounded(bot, tmp_path, monkeypatch):
     lock = threading.Lock()
     state = {'running': 0, 'peak': 0}
 
-    def slow_download(url, ignore_size_limit=False, progress_callback=None):
+    def slow_download(url, ignore_size_limit=False, progress_callback=None, **kwargs):
         with lock:
             state['running'] += 1
             state['peak'] = max(state['peak'], state['running'])

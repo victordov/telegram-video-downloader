@@ -51,6 +51,19 @@ def check_requirements() -> bool:
     print(f"ℹ️  Max upload size: {config.MAX_UPLOAD_SIZE_MB}MB, "
           f"max concurrent downloads: {config.MAX_CONCURRENT_DOWNLOADS}")
 
+    if config.ALLOWED_CHAT_IDS:
+        print(f"✅ Access limited to {len(config.ALLOWED_CHAT_IDS)} allowed ID(s)")
+    else:
+        print("⚠️  Anyone who finds the bot can use it - set ALLOWED_CHAT_IDS to restrict it")
+    if config.WEBHOOK_URL:
+        if not config.WEBHOOK_URL.startswith('https://'):
+            print("❌ WEBHOOK_URL must be an https:// address (Telegram refuses plain HTTP)")
+            ok = False
+        else:
+            print(f"✅ Webhook mode: {config.WEBHOOK_URL}/{config.WEBHOOK_PATH} "
+                  f"(listening on {config.WEBHOOK_LISTEN}:{config.WEBHOOK_PORT})")
+    print(f"✅ State database: {config.DATABASE_PATH}")
+
     if ok:
         print("✅ Requirements check passed!")
     return ok

@@ -87,9 +87,16 @@ docker compose up -d
 docker compose logs -f
 ```
 
-The compose file mounts `./downloads` as the staging directory and pins
-`DOWNLOAD_DIR` to it, so nothing accumulates inside the container layer.
-ffmpeg is installed in the image, so merged downloads and thumbnails work.
+The compose file mounts `./downloads` as the staging directory and `./data`
+for the SQLite database (file-ID cache, lifetime statistics, button links), so
+nothing accumulates inside the container layer and the cache survives rebuilds.
+ffmpeg is installed in the image, so merged downloads, thumbnails, shrinking
+and M4A audio work.
+
+The image's site-packages are read-only for the bot user, so yt-dlp cannot
+update itself there (`YTDLP_AUTO_UPDATE` is off in the compose file). Rebuild
+to pick up a new release: `docker compose build --pull && docker compose up -d`.
+The bot warns the admins when its yt-dlp is older than `YTDLP_STALE_DAYS`.
 
 ### Option 3: Heroku Deployment
 
@@ -159,6 +166,49 @@ LOG_FILE=bot.log    # also write to a file (stdout is always used)
 Under systemd or Docker, leave `LOG_FILE` unset and let journald/`docker logs`
 handle rotation.
 
+### Polling or webhooks
+On a laptop, the default polling mode needs nothing. On a server with a public
+HTTPS address, webhooks let Telegram push updates instead of the bot asking
+for them every few seconds:
+
+```env
+WEBHOOK_URL=https://bot.example.com   # what Telegram calls
+WEBHOOK_PORT=8443                     # where the bot listens
+WEBHOOK_PATH=telegram                 # -> https://bot.example.com/telegram
+```
+
+Put a reverse proxy (Caddy, nginx, Traefik) with TLS in front of the port;
+in Docker, uncomment the `ports` section of `docker-compose.yml`. Telegram
+sends `WEBHOOK_SECRET` (derived from the token unless you set one) with every
+update and the bot drops requests without it. Switching back to polling is just
+removing `WEBHOOK_URL`: the bot deletes the webhook on startup.
+
+### Access and abuse
+Set `ALLOWED_CHAT_IDS` to the user and group IDs that may use the bot.
+Members of an allowed group may also use it in their private chat and inline.
+When anyone else tries it, the admins get an Allow / Ignore prompt; approved
+chats are kept in the database, and `/access` lists them and undoes decisions.
+`RATE_LIMIT_PER_HOUR` (default 20) caps how many downloads each user can
+start; links resent from the cache are free.
+
+To find a group's ID, add the bot to it and post a link: the prompt shows it.
+
+### Logins (Reddit, Vimeo)
+Set `COOKIES_FROM_BROWSER=chrome` (or `firefox`, `chrome:Profile 1`, ...) on a
+machine where you are logged in to those sites. The bot reads the cookies once
+every few hours and keeps them in memory. With Chrome on macOS the first read
+asks for Keychain access; choose "Always Allow", or the prompt comes back.
+`COOKIES_ONLY_WHEN_NEEDED` (default on) keeps the cookies away from sites that
+work without a login. Docker containers cannot read a host browser: export a
+`cookies.txt` and use `COOKIE_FILE` there.
+
+### Alerts
+Admins (`ADMIN_CHAT_IDS`, defaulting to `PRIVATE_CHAT_IDS`) get a message when
+`ALERT_FAILURE_THRESHOLD` downloads in a row from one site fail for reasons
+that point at the site (not private or deleted posts), and another when it
+recovers. Unexpected errors are reported too, at most once per
+`ALERT_COOLDOWN_MINUTES`.
+
 ### Uploading files larger than 50MB
 `api.telegram.org` rejects bot uploads above 50MB. To lift that, run a
 [local Bot API server](https://github.com/tdlib/telegram-bot-api) alongside the
@@ -170,8 +220,9 @@ MAX_UPLOAD_SIZE_MB=2000
 PRIVATE_CHAT_IDS=123456789
 ```
 
-Without it, the bot detects the situation before uploading and tells the user
-rather than failing with an opaque "Request Entity Too Large".
+Without it, videos above 50MB are shrunk to fit (`COMPRESS_OVERSIZED`). Only
+videos too long to stay watchable at 50MB are refused, with a clear message
+rather than an opaque "Request Entity Too Large".
 
 ### Disk usage
 Downloads are staged in `DOWNLOAD_DIR` and deleted after each send, success or
@@ -205,7 +256,8 @@ threading.Thread(target=run_health_server, daemon=True).start()
 - **Error tracking**: Sentry
 
 ### Backup and Recovery
-- Backup bot configuration and logs
+- Back up `.env` and, if you care about the cache and lifetime statistics,
+  `data/bot.sqlite3` (losing it only means links are downloaded again)
 - Monitor disk space for downloads
 - Set up automated restarts on failure
 
@@ -213,8 +265,8 @@ threading.Thread(target=run_health_server, daemon=True).start()
 - Use environment variables for secrets
 - Run bot as non-root user
 - Keep dependencies updated
-- Monitor for unusual activity
-- Implement rate limiting if needed
+- Set `ALLOWED_CHAT_IDS` and keep `RATE_LIMIT_PER_HOUR` on
+- Never commit `data/` (it records which chats used the bot) or `.env`
 
 ### Performance Optimization
 - Clean up downloaded files regularly
@@ -223,9 +275,13 @@ threading.Thread(target=run_health_server, daemon=True).start()
 - Consider multiple bot instances for high load
 
 ### Updates and Maintenance
+yt-dlp updates itself every `YTDLP_UPDATE_INTERVAL_HOURS` (weekly) when the
+environment is writable, verifies the new copy imports (rolling back if not),
+and restarts once active downloads finish. Admins can force it with `/update`.
+
 ```bash
-# Update yt-dlp regularly
-pip install --upgrade yt-dlp
+# Update yt-dlp by hand
+pip install --upgrade "yt-dlp[default]"
 
 # Update all dependencies
 pip install --upgrade -r requirements.txt

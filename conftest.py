@@ -25,6 +25,18 @@ os.environ.update({
     'HINT_ON_UNTAGGED_LINKS': 'false',
     'CLEANUP_MAX_AGE_HOURS': '0',
     'PROGRESS_UPDATE_INTERVAL': '2',
+    # Each bot instance gets its own throwaway database.
+    'DATABASE_PATH': ':memory:',
+    'ALLOWED_CHAT_IDS': '',
+    'ADMIN_CHAT_IDS': '',
+    'RATE_LIMIT_PER_HOUR': '0',
+    'CACHE_TTL_DAYS': '30',
+    'CACHE_CHAT_ID': '',
+    'TRY_ANY_LINK': 'true',
+    'COMPRESS_OVERSIZED': 'true',
+    'MAX_ALBUM_ITEMS': '10',
+    'YTDLP_AUTO_UPDATE': 'false',
+    'WEBHOOK_URL': '',
 })
 
 

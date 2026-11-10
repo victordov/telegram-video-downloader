@@ -246,4 +246,5 @@ def test_real_webm_becomes_playable_mp4(tmp_path):
     assert 'vp9' not in probe and 'opus' not in probe
 
     # moov atom at the front so playback can start before the file finishes.
-    assert b'moov' in open(out, 'rb').read(2048)
+    with open(out, 'rb') as handle:
+        assert b'moov' in handle.read(2048)

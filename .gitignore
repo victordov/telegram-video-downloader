@@ -172,6 +172,10 @@ cython_debug/
 *.mp4
 *.webm
 *.mkv
+# Bot state: media cache, statistics, button links (holds chat activity)
+data/
+*.sqlite3
+*.sqlite3-*
 # OS and IDE leftovers
 .DS_Store
 .jbeval/

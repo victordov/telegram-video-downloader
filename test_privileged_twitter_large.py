@@ -39,7 +39,7 @@ async def test_privileged_large_download_uses_the_shared_downloader(bot, privile
 
     calls = []
 
-    def fake_download(url, ignore_size_limit=False, progress_callback=None):
+    def fake_download(url, ignore_size_limit=False, progress_callback=None, **kwargs):
         calls.append((url, ignore_size_limit))
         return {
             'filepath': downloaded_path,
@@ -69,7 +69,7 @@ async def test_privileged_group_chat_is_not_privileged(bot, privileged, download
     """The bypass is deliberately limited to private chats."""
     calls = []
 
-    def fake_download(url, ignore_size_limit=False, progress_callback=None):
+    def fake_download(url, ignore_size_limit=False, progress_callback=None, **kwargs):
         calls.append((url, ignore_size_limit))
         return {'error': 'file_too_large', 'message': 'too big', 'filesize': 120 * 1024 * 1024}
 

@@ -6,6 +6,7 @@ directly. Values are read once at import time from the environment (``.env`` is
 loaded first), validated, and exposed as module level constants.
 """
 
+import hashlib
 import logging
 import os
 import tempfile
@@ -18,6 +19,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 MB = 1024 * 1024
+
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _get_str(name: str, default: str = '') -> str:
@@ -80,6 +83,34 @@ HINT_ON_UNTAGGED_LINKS = _get_bool('HINT_ON_UNTAGGED_LINKS', False)
 
 #: Reply with an explanation when a private-chat link is not supported.
 REPLY_ON_UNSUPPORTED_LINKS = _get_bool('REPLY_ON_UNSUPPORTED_LINKS', True)
+
+#: In private chats (and with /dl), also try links from any site yt-dlp knows,
+#: not just the platforms listed in the help text.
+TRY_ANY_LINK = _get_bool('TRY_ANY_LINK', True)
+
+
+# --- Access -------------------------------------------------------------------
+
+#: User or chat IDs allowed to use the bot. Empty means everyone. A group's ID
+#: lets everyone in that group use it (in the group, privately and inline); a
+#: user's ID lets them use it anywhere. Privileged and admin IDs are always
+#: allowed, and admins can approve more chats from Telegram (see /access).
+ALLOWED_CHAT_IDS = _get_list('ALLOWED_CHAT_IDS')
+
+#: Who receives breakage alerts and may run /update. Defaults to the
+#: privileged chats, which are the owner's own.
+ADMIN_CHAT_IDS = _get_list('ADMIN_CHAT_IDS') or list(PRIVATE_CHAT_IDS)
+
+#: Downloads each user may start per hour. 0 disables the limit. Admins and
+#: privileged chats are exempt, and links answered from the cache are free.
+RATE_LIMIT_PER_HOUR = _get_int('RATE_LIMIT_PER_HOUR', 20, minimum=0)
+
+#: Tell strangers in a private chat that the bot is private (and their ID).
+REPLY_TO_UNAUTHORIZED = _get_bool('REPLY_TO_UNAUTHORIZED', True)
+
+#: Send admins an Allow / Ignore prompt when a chat outside the allow list
+#: tries the bot (at most once a day per chat).
+NOTIFY_ACCESS_REQUESTS = _get_bool('NOTIFY_ACCESS_REQUESTS', True)
 
 
 # --- Sizes and limits ---------------------------------------------------------
@@ -157,6 +188,18 @@ COOKIE_FILE = _get_str('COOKIE_FILE') or None
 #: e.g. "chrome" or "firefox:profile" - yt-dlp reads cookies straight from the browser.
 COOKIES_FROM_BROWSER = _get_str('COOKIES_FROM_BROWSER') or None
 
+#: Only send the cookies to sites that refuse to work without a login (Reddit,
+#: Vimeo, private posts). Everything else stays anonymous, so your accounts are
+#: not tied to every download anyone asks for.
+COOKIES_ONLY_WHEN_NEEDED = _get_bool('COOKIES_ONLY_WHEN_NEEDED', True)
+
+#: DNS-over-HTTPS server yt-dlp switches to when plain DNS is blocked (some VPNs
+#: such as Tailscale, corporate networks). TikTok and other sites that need a
+#: browser-like connection resolve names with their own DNS client, which those
+#: networks block. Use an IP address so the server itself needs no lookup.
+#: Empty turns the fallback off.
+DNS_FALLBACK_DOH_URL = os.getenv('DNS_FALLBACK_DOH_URL', 'https://1.1.1.1/dns-query').strip() or None
+
 #: Explicit ffmpeg directory when it is not on PATH.
 FFMPEG_LOCATION = _get_str('FFMPEG_LOCATION') or None
 
@@ -174,6 +217,83 @@ CONCURRENT_FRAGMENTS = _get_int('CONCURRENT_FRAGMENTS', 4, minimum=1, maximum=16
 #: Socket timeout and retry budget handed to yt-dlp.
 SOCKET_TIMEOUT_SECONDS = _get_int('SOCKET_TIMEOUT_SECONDS', 30, minimum=5)
 DOWNLOAD_RETRIES = _get_int('DOWNLOAD_RETRIES', 3, minimum=0, maximum=20)
+
+#: Re-encode videos that come out above the upload limit so they still fit
+#: (needs ffmpeg). Videos too long to fit at a watchable bitrate are refused.
+COMPRESS_OVERSIZED = _get_bool('COMPRESS_OVERSIZED', True)
+
+#: Do not download more than this just to shrink it afterwards.
+COMPRESS_MAX_SOURCE_MB = _get_int('COMPRESS_MAX_SOURCE_MB', 400, minimum=1)
+
+#: Most items sent from one multi-item post (Telegram albums hold up to 10).
+MAX_ALBUM_ITEMS = _get_int('MAX_ALBUM_ITEMS', 10, minimum=1, maximum=10)
+
+#: Height used by the "Higher quality" button. Above 1080p most sites only
+#: serve VP9/AV1, which would need a slow re-encode to play on Apple devices.
+HD_MAX_HEIGHT = _get_int('HD_MAX_HEIGHT', 1080, minimum=144, maximum=4320)
+
+
+# --- Captions -----------------------------------------------------------------
+
+#: Add the author, linked to their profile, under the title.
+CAPTION_AUTHOR = _get_bool('CAPTION_AUTHOR', True)
+
+#: Add the post's description as a collapsed "show more" quote.
+CAPTION_DESCRIPTION = _get_bool('CAPTION_DESCRIPTION', True)
+
+#: Blur media the site marks as adult (age limit 18+) behind a spoiler.
+SPOILER_ADULT_CONTENT = _get_bool('SPOILER_ADULT_CONTENT', True)
+
+
+# --- State --------------------------------------------------------------------
+
+#: SQLite file for the media cache, statistics and button links. Keep it out of
+#: git; in Docker, mount a volume over its folder so it survives rebuilds.
+DATABASE_PATH = _get_str('DATABASE_PATH') or os.path.join(PROJECT_DIR, 'data', 'bot.sqlite3')
+
+#: Resend a link that was already uploaded instead of downloading it again,
+#: for this many days. 0 disables the cache.
+CACHE_TTL_DAYS = _get_int('CACHE_TTL_DAYS', 30, minimum=0)
+
+#: Chat the bot uploads to when it prepares a video for inline mode
+#: (@bot <link>) before anyone has sent that link. A private channel with the
+#: bot as admin works best. Empty: inline users get a "send in private" button.
+CACHE_CHAT_ID = _get_str('CACHE_CHAT_ID') or None
+
+
+# --- Maintenance --------------------------------------------------------------
+
+#: Update yt-dlp in place on a schedule and restart. Sites change often and
+#: yt-dlp is what breaks first. Skipped when the environment is read-only
+#: (e.g. a Docker image); rebuild the image there instead.
+YTDLP_AUTO_UPDATE = _get_bool('YTDLP_AUTO_UPDATE', True)
+YTDLP_UPDATE_INTERVAL_HOURS = _get_int('YTDLP_UPDATE_INTERVAL_HOURS', 168, minimum=1)
+
+#: /status warns when the installed yt-dlp is older than this.
+YTDLP_STALE_DAYS = _get_int('YTDLP_STALE_DAYS', 30, minimum=1)
+
+#: Alert the admins after this many failures in a row from one site.
+ALERT_FAILURE_THRESHOLD = _get_int('ALERT_FAILURE_THRESHOLD', 3, minimum=1)
+
+#: Do not repeat an alert about the same site more often than this.
+ALERT_COOLDOWN_MINUTES = _get_int('ALERT_COOLDOWN_MINUTES', 60, minimum=1)
+
+
+# --- Webhook ------------------------------------------------------------------
+
+#: Public HTTPS address Telegram should push updates to, e.g.
+#: https://bot.example.com. Empty: poll for updates (fine on a laptop).
+WEBHOOK_URL = _get_str('WEBHOOK_URL').rstrip('/')
+WEBHOOK_LISTEN = _get_str('WEBHOOK_LISTEN', '0.0.0.0')
+WEBHOOK_PORT = _get_int('WEBHOOK_PORT', 8443, minimum=1, maximum=65535)
+WEBHOOK_PATH = _get_str('WEBHOOK_PATH', 'telegram').strip('/')
+
+#: Telegram sends this back in a header so the bot can reject forged updates.
+#: Defaults to a value derived from the token, so it is stable and secret.
+WEBHOOK_SECRET = _get_str('WEBHOOK_SECRET') or (
+    hashlib.sha256(f"webhook:{TELEGRAM_BOT_TOKEN}".encode()).hexdigest()[:48]
+    if TELEGRAM_BOT_TOKEN else ''
+)
 
 
 # --- Logging ------------------------------------------------------------------
@@ -212,5 +332,8 @@ def describe() -> str:
         f"concurrency={MAX_CONCURRENT_DOWNLOADS} "
         f"upload_timeout={UPLOAD_TIMEOUT_SECONDS}s "
         f"privileged_chats={len(PRIVATE_CHAT_IDS)} "
-        f"local_api={'yes' if USE_LOCAL_BOT_API else 'no'}"
+        f"allowed={'everyone' if not ALLOWED_CHAT_IDS else len(ALLOWED_CHAT_IDS)} "
+        f"rate_limit={RATE_LIMIT_PER_HOUR or 'off'}/h "
+        f"local_api={'yes' if USE_LOCAL_BOT_API else 'no'} "
+        f"mode={'webhook' if WEBHOOK_URL else 'polling'}"
     )
